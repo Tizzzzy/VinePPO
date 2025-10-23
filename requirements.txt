@@ -3,11 +3,11 @@ numpy==1.26.4
 torch==2.1.2
 torchvision==0.16.2
 torchaudio==2.1.2
-https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.5/flash_attn-2.5.5+cu122torch2.1cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+# https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.5/flash_attn-2.5.5+cu122torch2.1cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 deepspeed==0.14.1
 triton==2.1.0
 xformers==0.0.23.post1
-https://github.com/McGill-NLP/VinePPO/releases/download/latest/vllm-0.4.0.post1-cp310-cp310-linux_x86_64.whl
+# https://github.com/McGill-NLP/VinePPO/releases/download/latest/vllm-0.4.0.post1-cp310-cp310-linux_x86_64.whl
 accelerate==0.27.2
 transformers==4.38.1
 tokenizers==0.15.2
@@ -29,7 +29,7 @@ fire==0.5.0
 wandb==0.16.3
 tqdm==4.66.2
 chardet==5.2.0
-cchardet==2.1.7
+# cchardet==2.1.7
 graphviz==0.20.1
 matplotlib==3.8.3
 plotnine==0.13.0

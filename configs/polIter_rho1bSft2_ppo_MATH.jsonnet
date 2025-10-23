@@ -106,8 +106,8 @@ local sampling_temperature = 0.6;
             per_device_train_batch_size: null,  // Will be auto computed
             gradient_accumulation_steps: 1,
 
-            save_steps: 40,
-            checkpoint_keep_steps: 40,
+            save_steps: 10,
+            checkpoint_keep_steps: 10,
         },
     },
 

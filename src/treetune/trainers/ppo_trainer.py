@@ -1,3 +1,9 @@
+import os
+import json
+from tqdm import tqdm # Already imported, ensure available
+from torch.utils.data import DataLoader
+from torch.nn import CrossEntropyLoss
+
 import json
 import logging
 import shutil
@@ -165,6 +171,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         cache_deepspeed_engines: bool = False,
         move_reference_model_to_cpu: bool = False,
         save_hf_critic_checkpoint: bool = False,
+        run_tracin_analysis: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -238,6 +245,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         self.disable_critic_training = disable_critic_training
         self.report_entropy = report_entropy
         self.save_hf_critic_checkpoint = save_hf_critic_checkpoint
+        self.run_tracin_analysis = run_tracin_analysis
 
         if self._has_critic_model() and disable_critic_training:
             logger.warning(
@@ -405,6 +413,13 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
         # Train the actor and critic models using PPO
         self._train_actor_critic(episodes_dataset, actor_engine, critic_engine)
+
+        if self.run_tracin_analysis and self.distributed_state.is_main_process:
+             logger.info(f"--- Starting TracIn Analysis for Iteration {self.state.iteration} ---")
+             # NOTE: 'episodes_dataset' now has all pre-calculated columns attached
+             self._run_tracin_analysis(episodes_dataset, self.state.iteration, actor_engine, critic_engine)
+             logger.info(f"--- Finished TracIn Analysis for Iteration {self.state.iteration} ---")
+        dist.barrier()
 
         # Save the models' state if needed
         should_save_full_ckpt = (
@@ -1897,6 +1912,424 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             value_mask = attention_mask
 
         return {"values": predicted_values, "value_mask": value_mask}
+    
+    # --- START: NEW TracIn HELPER METHODS ---
+
+    def _get_flat_gradients_tracin(
+        self,
+        actor_engine: DeepSpeedEngine,
+        critic_engine: Optional[DeepSpeedEngine],
+        zero_grad: bool = True
+    ) -> torch.Tensor:
+        """Helper to get a flat vector of gradients from actor and critic."""
+        all_grads = []
+
+        # Get Actor gradients
+        for param in actor_engine.module.parameters():
+            if param.grad is not None:
+                all_grads.append(param.grad.view(-1))
+            else:
+                # Append zero tensor if grad is None (e.g., frozen layers)
+                all_grads.append(torch.zeros_like(param.view(-1)))
+
+        # Get Critic gradients
+        if critic_engine is not None and not self.disable_critic_training:
+            for param in critic_engine.module.parameters():
+                if param.grad is not None:
+                    all_grads.append(param.grad.view(-1))
+                else:
+                    all_grads.append(torch.zeros_like(param.view(-1)))
+
+        if not all_grads:
+            return torch.tensor([]).to(self.distributed_state.device)
+
+        flat_grads = torch.cat(all_grads)
+
+        # Zero gradients after copying
+        if zero_grad:
+            actor_engine.zero_grad()
+            if critic_engine is not None:
+                critic_engine.zero_grad()
+
+        return flat_grads
+
+    def _prepare_validation_example_tracin(self):
+        """Prepares a single validation example for TracIn analysis."""
+        if not hasattr(self.runtime, "task"): # Access task via runtime
+            logger.warning("Trainer's runtime does not have 'task' object. Skipping TracIn.")
+            return None
+
+        task = self.runtime.task
+        tokenizer = self.runtime.tokenizer # Access tokenizer via runtime
+
+        try:
+            # Use the first example from the 'train' split as our target
+            # You can customize this to pick any example
+            val_example = task.dataset['train'][0]
+
+            fields = task.get_fields(val_example)
+            query_text = fields['query']
+            answer_text = fields['answer'] # This is the GROUND TRUTH answer
+
+            # Format using the prompt template
+            full_text = task.prompt_template.format(
+                question=query_text,
+                answer=answer_text
+            )
+
+            tokenized = tokenizer(
+                full_text,
+                return_tensors='pt',
+                truncation=True,
+                max_length=self.args.max_seq_len - 1 if self.args.max_seq_len else 1023 # Use max_seq_len from args
+            )
+
+            input_ids = tokenized.input_ids.to(self.distributed_state.device)
+            attention_mask = tokenized.attention_mask.to(self.distributed_state.device)
+
+            # --- SFT Loss Label Preparation ---
+            # Labels are input_ids shifted
+            labels = input_ids.clone()
+            # We need to mask out the query part for the loss
+
+            # Re-tokenize only the prompt part to find its length
+            prompt_text = task.prompt_template.format(
+                question=query_text,
+                answer="" # Empty answer
+            )
+            # Important: Add eos_token if the original template adds it, to match tokenization
+            # Check if template usually ends with eos_token; adapt as needed. Assuming it doesn't here.
+            query_tokenized = tokenizer(
+                prompt_text,
+                return_tensors='pt',
+                add_special_tokens=True # Ensure BOS token is included if usually present
+            )
+
+            # Calculate query length *including special tokens* like BOS
+            # The length to mask is the length of the prompt tokens
+            query_len = query_tokenized.input_ids.shape[1]
+
+            # Mask labels up to the end of the prompt (exclusive of the first answer token)
+            labels[:, :query_len] = -100 # Mask prompt tokens
+
+            # Ensure the last token is also masked if it's padding or EOS after answer
+            # This depends on how the tokenizer handles the full_text
+            # A simple approach: mask based on attention mask
+            labels[attention_mask == 0] = -100
+
+            # Verify: Make sure we are not masking the entire sequence
+            if (labels == -100).all():
+                logger.warning(f"[TracIn] All labels masked out for val example. Check prompt/answer lengths and max_seq_len. Query len: {query_len}, Total len: {input_ids.shape[1]}")
+                return None
+
+
+            return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to prepare validation example for TracIn: {e}", exc_info=True)
+            return None
+
+    def _get_sft_loss_and_grad_tracin(
+        self,
+        val_batch: Dict[str, torch.Tensor],
+        actor_engine: DeepSpeedEngine,
+        critic_engine: Optional[DeepSpeedEngine]
+        ):
+        """Calculates SFT loss and gradient for the validation batch."""
+        if val_batch is None:
+            return None, 0.0
+
+        actor_engine.train() # Ensure model is in train mode for grads
+        if critic_engine:
+            critic_engine.train()
+
+        # Zero gradients for ALL trainable models
+        actor_engine.zero_grad()
+        if critic_engine:
+             critic_engine.zero_grad()
+
+
+        # --- Calculate SFT Loss (Cross-Entropy) ---
+        # Forward pass ONLY through the ACTOR model
+        outputs = actor_engine(
+            input_ids=val_batch['input_ids'],
+            attention_mask=val_batch['attention_mask'],
+            return_dict=True,
+            use_cache=False
+        )
+        logits = outputs.logits
+
+        # Shift logits and labels for CrossEntropyLoss
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = val_batch['labels'][..., 1:].contiguous()
+
+        # Calculate loss only on non-masked tokens
+        loss_fct = CrossEntropyLoss(ignore_index=-100)
+        vocab_size = shift_logits.shape[-1]
+        loss = loss_fct(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+        # --- End SFT Loss Calculation ---
+
+
+        # Backward pass using DeepSpeed Engine
+        actor_engine.backward(loss)
+        # Note: Critic grads will remain zero, which is correct for SFT loss
+
+        # Flatten gradients from *both* models
+        g_val = self._get_flat_gradients_tracin(actor_engine, critic_engine, zero_grad=True) # Zero grads inside helper
+
+        # Check for empty gradient (might happen if loss is zero or no params require grad)
+        if g_val is None or g_val.numel() == 0:
+             logger.warning("[TracIn] Validation gradient is empty. Check model setup or loss value.")
+             return None, loss.item() # Return loss even if grad is empty
+
+        return g_val, loss.item()
+
+
+    def _get_ppo_loss_and_grad_tracin(
+        self,
+        batch: Dict[str, torch.Tensor],
+        actor_engine: DeepSpeedEngine,
+        critic_engine: Optional[DeepSpeedEngine]
+    ):
+        """Calculates PPO loss and gradient for a single training batch."""
+
+        actor_engine.train()
+        if critic_engine:
+            critic_engine.train()
+
+        # Zero gradients
+        actor_engine.zero_grad()
+        if critic_engine:
+            critic_engine.zero_grad()
+
+        # Move batch to device (already done in _training_step, but good practice here too)
+        batch = {k: v.to(actor_engine.device) for k, v in batch.items()}
+
+        # Recompute Rewards, Advantages, Returns (as done in _training_step)
+        # These are needed if they weren't stored or if re-computation is preferred
+        # For simplicity, we assume they are correctly passed in the batch from pre-calculation
+        shifted_labels = batch['labels'][..., 1:].contiguous()
+        shifted_labels_mask = (shifted_labels != -100).to(batch['attention_mask'].dtype)
+        old_logprobs = batch[COLUMN_ACTOR_SHIFTED_LOGPS]
+        ref_logprobs = batch.get(COLUMN_REF_SHIFTED_LOGPS, None) # Optional
+
+        with torch.no_grad(): # Ensure advantages calculation doesn't track grads
+             rewards, _, _ = self._compute_rewards(
+                 batch['scores'], old_logprobs, ref_logprobs, batch['attention_mask']
+             )
+             if self._has_critic_model():
+                 old_values = batch[COLUMN_VALUES]
+                 old_valid_values = old_values[:, :-1] * shifted_labels_mask
+                 advantages, returns = self._compute_advantages(
+                    old_valid_values, rewards, shifted_labels_mask
+                 )
+             else: # Handle case without critic (advantages precomputed or not used)
+                 advantages = batch["advantages"][:, 1:] # Assuming precomputed and shifted
+                 returns = None # Returns not needed if no critic
+                 old_valid_values = None
+
+        # --- Calculate PPO Loss Components ---
+        model_inputs = {
+            "input_ids": batch["input_ids"],
+            "attention_mask": batch["attention_mask"],
+            "labels": batch["labels"]
+        }
+
+        # Actor Loss
+        actor_loss, _, _, _ = self._compute_actor_loss(
+             actor_engine,
+             model_inputs=model_inputs,
+             shifted_labels_mask=shifted_labels_mask,
+             old_logprobs=old_logprobs,
+             ref_logprobs=ref_logprobs,
+             advantages=advantages,
+        )
+
+        # Critic Loss
+        if critic_engine is not None and not self.disable_critic_training:
+             critic_loss, _ = self._compute_critics_loss(
+                 critic_engine,
+                 model_inputs=model_inputs.copy(), # Avoid modifying original dict
+                 shifted_labels_mask=shifted_labels_mask,
+                 old_valid_values=old_valid_values, # Use pre-calculated old values
+                 returns=returns, # Use calculated returns
+             )
+             loss = actor_loss + self.ppo_hparams.vf_coef * critic_loss # Use vf_coef here
+        else:
+             loss = actor_loss
+             critic_loss = torch.tensor(0.0) # Placeholder
+
+        # --- End PPO Loss Calculation ---
+
+        # Backward pass using DeepSpeed Engine
+        # Important: Use actor_engine.backward for combined loss
+        actor_engine.backward(loss)
+
+        # Flatten gradients
+        g_train = self._get_flat_gradients_tracin(actor_engine, critic_engine, zero_grad=True) # Zero grads inside helper
+
+        # Check for empty gradient
+        if g_train is None or g_train.numel() == 0:
+             logger.warning("[TracIn] Training gradient is empty. Check model setup or loss value.")
+             # Fallback: maybe return zero vector of correct size?
+             # For now, return None and handle upstream
+             return None, loss.item()
+
+
+        return g_train, loss.item()
+
+    def _run_tracin_analysis(
+          self,
+          episodes_dataset: Dataset,
+          iteration: int,
+          actor_engine: DeepSpeedEngine, # Pass engines
+          critic_engine: Optional[DeepSpeedEngine]
+        ):
+        """Runs the full TracIn analysis for the current iteration."""
+        # Ensure tokenizer is available (might need to load it if not cached)
+        # Assuming runtime/task is accessible as in _prepare_validation_example_tracin
+        if not hasattr(self.runtime, "tokenizer"):
+             logger.error("[TracIn] Tokenizer not found on runtime. Cannot decode results.")
+             return
+        tokenizer = self.runtime.tokenizer
+
+        try:
+            # --- 1. Calculate Validation Gradient (G_val) ---
+            logger.info("[TracIn] Preparing validation example...")
+            val_batch = self._prepare_validation_example_tracin()
+            if val_batch is None:
+                logger.error("[TracIn] Could not prepare validation example. Aborting.")
+                return
+
+            logger.info("[TracIn] Calculating validation gradient (G_val)...")
+            g_val, val_loss = self._get_sft_loss_and_grad_tracin(val_batch, actor_engine, critic_engine)
+
+            if g_val is None:
+                logger.error("[TracIn] Validation gradient calculation failed. Aborting.")
+                return
+
+            logger.info(f"[TracIn] G_val shape: {g_val.shape}, Val Loss: {val_loss}")
+
+            # --- 2. Calculate Training Gradients (G_train_i) ---
+            logger.info("[TracIn] Calculating training gradients (G_train_i)...")
+
+            # We need a DataLoader to iterate *without* distributed sampling
+            # Use standard PPODataCollator, batch size MUST be 1
+            data_collator = PPODataCollator()
+            dataloader = DataLoader(
+                episodes_dataset, # Dataset already on device from pre-calc? Check original code. Assume needs .to(device) if not.
+                batch_size=1, # Per-record gradients require batch size 1
+                shuffle=False, # Maintain order to map back results
+                collate_fn=data_collator,
+                # Consider num_workers=0 if encountering issues with multiprocessing and DeepSpeed
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+
+            influence_scores = []
+
+            pbar = tqdm(
+                dataloader,
+                desc=f"[TracIn] Iter {iteration} G_train_i",
+                disable=not self._is_main_process() # Already on main process, but safe check
+            )
+
+            # Ensure models stay in train mode throughout the loop
+            actor_engine.train()
+            if critic_engine: critic_engine.train()
+
+            original_indices = list(range(len(episodes_dataset))) # Keep track of original indices
+
+            for i, batch in enumerate(pbar):
+                # Get the original index for this item
+                original_idx = original_indices[i] # Assumes dataloader preserves order
+
+                g_train_i, train_loss_i = self._get_ppo_loss_and_grad_tracin(batch, actor_engine, critic_engine)
+
+                if g_train_i is None:
+                    logger.warning(f"[TracIn] Skipping empty gradient for train example index {original_idx}")
+                    influence_scores.append({
+                        "original_index": original_idx,
+                        "influence_score": 0.0, # Or None/NaN?
+                        "ppo_loss": train_loss_i,
+                        "reward": batch.get('scores', torch.tensor([0.0])).item(), # Safely get score
+                        "query": "GRADIENT_CALC_FAILED",
+                        "response": "GRADIENT_CALC_FAILED",
+                    })
+                    continue
+
+                # --- 3. Compute Influence ---
+                # Ensure gradients are detached before dot product
+                score = torch.dot(g_val.detach(), g_train_i.detach()).item()
+
+                # --- Store results with Original Index ---
+                # Decode query and response - Need original token ids before collation
+                # Accessing original data might require fetching from `episodes_dataset` by index
+                try:
+                     original_record = episodes_dataset[original_idx]
+                     query_tokens = original_record['query_token_ids']
+                     response_tokens = original_record['response_token_ids']
+                     query_text = tokenizer.decode(query_tokens, skip_special_tokens=True)
+                     response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
+                     reward_val = original_record['scores'] # Get original score
+                except Exception as e:
+                     logger.warning(f"[TracIn] Failed to decode text for index {original_idx}: {e}")
+                     query_text = f"DECODING_FAILED_{original_idx}"
+                     response_text = f"DECODING_FAILED_{original_idx}"
+                     reward_val = batch.get('scores', torch.tensor([0.0])).item() # Fallback
+
+                influence_scores.append({
+                    "original_index": original_idx, # Store original index
+                    "influence_score": score,
+                    "ppo_loss": train_loss_i,
+                    "reward": reward_val,
+                    "query": query_text,
+                    "response": response_text,
+                })
+
+            # --- 4. Save Results ---
+            logger.info("[TracIn] Saving influence scores...")
+
+            influence_scores.sort(key=lambda x: x['influence_score'], reverse=True)
+
+            # Use experiment_root from the Trainer base class for output path
+            output_dir = self.experiment_root / "tracin_analysis"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            results_path = output_dir / f"tracin_results_iter_{iteration}.json"
+
+            try:
+                with open(results_path, 'w') as f:
+                    json.dump(
+                        {
+                            "iteration": iteration,
+                            "validation_target": "First training example (SFT Loss)", # Describe target
+                            "validation_loss": val_loss,
+                            "proponents": influence_scores[:50], # Save more examples
+                            "opponents": influence_scores[-50:], # Save more examples
+                            # "all_scores": influence_scores # Uncomment carefully - large file!
+                        },
+                        f,
+                        indent=2
+                    )
+                logger.info(f"[TracIn] Saved results to {results_path}")
+            except Exception as e:
+                logger.error(f"[TracIn] Failed to save results: {e}")
+
+        except Exception as e:
+            logger.error(f"[TracIn] Error during analysis: {e}", exc_info=True)
+        finally:
+            # Ensure models are back in training mode if needed later
+            # (though they should already be if no errors occurred)
+            actor_engine.train()
+            if critic_engine: critic_engine.train()
+            # No dataset format changes needed for this version
+
+    # --- END: NEW TracIn HELPER METHODS ---
 
     def _init_reference_model(
         self, only_return_unwrapped_model: bool = False
