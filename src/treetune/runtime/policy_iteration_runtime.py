@@ -135,6 +135,7 @@ class PolicyIterationRuntime(DistributedRuntime):
 
     def _construct_trainer(self, init_model_only):
         return self.trainer.construct(
+            runtime=self,
             model=self.model,
             cloud_logger=self.cloud_logger,
             distributed_state=self.distributed_state,
