@@ -1970,14 +1970,16 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         try:
             # Use the first example from the 'train' split as our target
             # You can customize this to pick any example
-            val_example = task.dataset['train'][0]
+            val_example = task.get_datasets(split='train')[0]
 
-            fields = task.get_fields(val_example)
-            query_text = fields['query']
-            answer_text = fields['answer'] # This is the GROUND TRUTH answer
+            query_text = val_example['question']
+            answer_text = val_example['answer'] # This is the GROUND TRUTH answer
+
+            # prompt_template = self.runtime.episode_generator.prompt_template
+            prompt_template = self.runtime.episode_generator._prompt_library["prompt"]
 
             # Format using the prompt template
-            full_text = task.prompt_template.format(
+            full_text = prompt_template.format(
                 question=query_text,
                 answer=answer_text
             )
@@ -1998,7 +2000,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             # We need to mask out the query part for the loss
 
             # Re-tokenize only the prompt part to find its length
-            prompt_text = task.prompt_template.format(
+            prompt_text = prompt_template.format(
                 question=query_text,
                 answer="" # Empty answer
             )

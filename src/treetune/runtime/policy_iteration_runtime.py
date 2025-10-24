@@ -114,6 +114,15 @@ class PolicyIterationRuntime(DistributedRuntime):
             exp_root=self.exp_root,
             seed=self.global_vars["seed"],
         )
+        if hasattr(self.episode_generator, "task"):
+            self.task = self.episode_generator.task
+        else:
+            self.task = None
+            logger.warning(
+                "self.episode_generator does not have a 'task' attribute. "
+                "Setting self.runtime.task to None. "
+                "This might cause issues if other components (like TracIn) expect it."
+            )
         # Handle the case where we are precomputing episodes from an offline inference result
         if self.episode_generator.can_precompute_episodes:
             episode_cache_len = self._precompute_episodes()
