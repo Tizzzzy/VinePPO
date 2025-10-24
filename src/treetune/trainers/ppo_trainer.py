@@ -1,6 +1,7 @@
 import os
 import json
 from tqdm import tqdm # Already imported, ensure available
+from treetune.runtime.base_runtime import Runtime
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
 
@@ -171,10 +172,11 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         cache_deepspeed_engines: bool = False,
         move_reference_model_to_cpu: bool = False,
         save_hf_critic_checkpoint: bool = False,
-        run_tracin_analysis: bool = False,
+        run_tracin_analysis: bool = True,
+        runtime: Optional["Runtime"] = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(runtime=runtime, **kwargs)
         self._set_process_log_level(logger)
 
         self.ppo_hparams = PPOHParams(**params)
@@ -1955,11 +1957,14 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
     def _prepare_validation_example_tracin(self):
         """Prepares a single validation example for TracIn analysis."""
+        if not hasattr(self, "runtime") or self.runtime is None: # Add a check just in case
+            logger.error("Trainer's runtime object not found. Skipping TracIn prep.")
+            return None
         if not hasattr(self.runtime, "task"): # Access task via runtime
             logger.warning("Trainer's runtime does not have 'task' object. Skipping TracIn.")
             return None
 
-        task = self.runtime.task
+        task = self.runtime.episode_generator.task # Access task via episode_generator
         tokenizer = self.runtime.tokenizer # Access tokenizer via runtime
 
         try:
@@ -2192,9 +2197,12 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         """Runs the full TracIn analysis for the current iteration."""
         # Ensure tokenizer is available (might need to load it if not cached)
         # Assuming runtime/task is accessible as in _prepare_validation_example_tracin
+        if not hasattr(self, "runtime") or self.runtime is None: # Add a check just in case
+            logger.error("Trainer's runtime object not found. Skipping TracIn analysis.")
+            return
         if not hasattr(self.runtime, "tokenizer"):
-             logger.error("[TracIn] Tokenizer not found on runtime. Cannot decode results.")
-             return
+            logger.error("[TracIn] Tokenizer not found on runtime. Cannot decode results.")
+            return
         tokenizer = self.runtime.tokenizer
 
         try:

@@ -23,6 +23,8 @@ from treetune.trainers.arguments import TrainingArguments
 from treetune.trainers.base_trainer import Trainer
 from treetune.trainers.policy_trainer import TrainerState, Checkpoint
 
+from treetune.runtime.base_runtime import Runtime
+
 logger = get_logger(__name__)
 
 
@@ -38,16 +40,27 @@ class DeepSpeedPolicyTrainer(Trainer):
         distributed_state: PartialState,
         experiment_root: Path,
         cloud_logger: Optional[WandbRun] = None,
+        runtime: Optional["Runtime"] = None,
+        **kwargs
     ):
-        self.distributed_state = distributed_state
+        super().__init__(
+            distributed_state=distributed_state,
+            experiment_root=experiment_root,
+            cloud_logger=cloud_logger,
+            runtime=runtime, # <-- PASS runtime HERE
+             # Pass along any other caught kwargs
+            **kwargs
+            )
+        
+        # self.distributed_state = distributed_state
 
         self.state = TrainerState()
 
-        self.cloud_logger = cloud_logger
+        # self.cloud_logger = cloud_logger
 
-        self.experiment_root = experiment_root
-        self.checkpoints_dir = self.experiment_root / "checkpoints"
-        self.checkpoints_dir.mkdir(exist_ok=True, parents=True)
+        # self.experiment_root = experiment_root
+        # self.checkpoints_dir = self.experiment_root / "checkpoints"
+        # self.checkpoints_dir.mkdir(exist_ok=True, parents=True)
         self._validate_checkpoint_format()
 
         # define default x-axis (for latest wandb versions)
@@ -141,7 +154,8 @@ class DeepSpeedPolicyTrainer(Trainer):
 
     def load_checkpoint(self, checkpoint: Union[Checkpoint, Path]) -> None:
         if self._can_log_to_cloud():
-            self.cloud_logger.summary["last_loaded_checkpoint"] = str(checkpoint.path.name)
+            path_to_log = checkpoint.path if isinstance(checkpoint, Checkpoint) else checkpoint
+            self.cloud_logger.summary["last_loaded_checkpoint"] = str(path_to_log.name)
 
     def save_checkpoint(self, checkpoint_path: Path) -> None:
         raise NotImplementedError()
