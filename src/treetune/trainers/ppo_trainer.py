@@ -910,7 +910,36 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         log_ratio = (logprobs - old_logprobs) * action_mask
         ratio = torch.exp(log_ratio)
 
+        if torch.isnan(ratio).any() or torch.isinf(ratio).any():
+            logger.warning(f"NaN or Inf detected in ratio tensor. Zeroing pg_loss. Log ratio stats: mean={log_ratio.mean().item():.2f}, std={log_ratio.std().item():.2f}")
+            # Set pg_loss to zero and create dummy metrics to avoid crashing
+            pg_loss = torch.tensor(0.0, device=actor.device, requires_grad=True) # Needs grad for backward
+            # Provide default/dummy values for metrics calculated later
+            pg_clip_frac = torch.tensor(0.0, device=actor.device)
+            approx_kl = torch.tensor(0.0, device=actor.device)
+            policy_kl = torch.tensor(0.0, device=actor.device)
+            avg_ratio = ratio.mean() # Keep avg_ratio for potential logging later if needed
+            pg_losses1_anomalies = {'num_nan': 1, 'num_inf': 1, 'num_high_z': 0, 'total_anomalies': 2} # Dummy anomalies
+            is_skipped = True # Mark as skipped conceptually
+
+            # Early exit for this specific calculation path if ratio is invalid
+            metrics = {
+                 "actor/approx_kl": approx_kl.detach(),
+                 "actor/policy_kl": policy_kl.detach(),
+                 "actor/clip_frac": pg_clip_frac.detach(),
+                 "actor/ratio": avg_ratio.detach() if not torch.isnan(avg_ratio) and not torch.isinf(avg_ratio) else torch.tensor(float('inf')), # Log inf if it was inf
+                 **{f"actor/pg_losses1_anomalies__{i}": v for i, v in pg_losses1_anomalies.items()},
+            }
+            if "entropy" in outputs: metrics["actor/logit_entropy"] = outputs["entropy"].detach()
+            # ref_kl_loss handling: Assume 0 if we are skipping due to bad ratio
+            if self.ppo_hparams.kl_penalty_loss_type is not None: metrics["actor/ref_kl_loss"] = torch.tensor(0.0)
+            
+            # Return pg_loss=0, skipped=True, dummy metrics, and ref_kl=None
+            return pg_loss, is_skipped, metrics, None
+
         pg_losses1 = -advantages * ratio
+        print(f"DEBUG: pg_losses1 shape={pg_losses1.shape}, has_nan={torch.isnan(pg_losses1).any().item()}, has_inf={torch.isinf(pg_losses1).any().item()}")
+        print(f"DEBUG: action_mask shape={action_mask.shape}, dtype={action_mask.dtype}, sum={action_mask.sum().item()}")
         with torch.no_grad():
             pg_losses1_anomalies = monitor_tensor_anomalies(
                 pg_losses1.detach(), action_mask
@@ -1975,8 +2004,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             query_text = val_example['question']
             answer_text = val_example['answer'] # This is the GROUND TRUTH answer
 
-            # prompt_template = self.runtime.episode_generator.prompt_template
-            prompt_template = self.runtime.episode_generator._prompt_library["prompt"]
+            prompt_template = "<start_of_turn>user\n{question}<end_of_turn>\n<start_of_turn>assistant\n{answer}"
 
             # Format using the prompt template
             full_text = prompt_template.format(
@@ -1988,7 +2016,6 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 full_text,
                 return_tensors='pt',
                 truncation=True,
-                max_length=self.args.max_seq_len - 1 if self.args.max_seq_len else 1023 # Use max_seq_len from args
             )
 
             input_ids = tokenized.input_ids.to(self.distributed_state.device)
@@ -2258,6 +2285,85 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 # Get the original index for this item
                 original_idx = original_indices[i] # Assumes dataloader preserves order
 
+                if i == 0: # Only print for the first batch where it seems to crash
+                    print(f"\n--- Debugging TracIn Batch Index: {original_idx} ---")
+                    try:
+                        # Move batch to device early for inspection
+                        batch_device = {k: v.to(actor_engine.device) for k, v in batch.items()}
+
+                        print(f"Batch keys: {list(batch_device.keys())}")
+                        print(f"input_ids shape: {batch_device.get('input_ids', 'N/A')}")
+                        if 'input_ids' in batch_device: print(f"input_ids shape: {batch_device['input_ids'].shape}")
+                        if 'attention_mask' in batch_device: print(f"attention_mask shape: {batch_device['attention_mask'].shape}")
+                        if 'labels' in batch_device: print(f"labels shape: {batch_device['labels'].shape}")
+
+                        shifted_labels = batch_device['labels'][..., 1:].contiguous()
+                        shifted_labels_mask = (shifted_labels != -100).to(batch_device['attention_mask'].dtype)
+                        print(f"shifted_labels_mask shape: {shifted_labels_mask.shape}, sum: {shifted_labels_mask.sum().item()}")
+
+                        old_logprobs = batch_device[COLUMN_ACTOR_SHIFTED_LOGPS]
+                        print(f"old_logprobs shape: {old_logprobs.shape}, has NaN: {torch.isnan(old_logprobs).any().item()}, has Inf: {torch.isinf(old_logprobs).any().item()}")
+
+                        ref_logprobs = batch_device.get(COLUMN_REF_SHIFTED_LOGPS, None)
+                        if ref_logprobs is not None:
+                            print(f"ref_logprobs shape: {ref_logprobs.shape}, has NaN: {torch.isnan(ref_logprobs).any().item()}, has Inf: {torch.isinf(ref_logprobs).any().item()}")
+                        else: print("ref_logprobs: None")
+
+                        # Recompute advantages/returns for inspection (inside no_grad context)
+                        with torch.no_grad():
+                            rewards, _, _ = self._compute_rewards(
+                                batch_device['scores'], old_logprobs, ref_logprobs, batch_device['attention_mask']
+                            )
+                            print(f"rewards shape: {rewards.shape}, has NaN: {torch.isnan(rewards).any().item()}, has Inf: {torch.isinf(rewards).any().item()}")
+
+                            advantages = None
+                            returns = None
+                            old_valid_values = None
+
+                            if self._has_critic_model():
+                                old_values = batch_device[COLUMN_VALUES]
+                                old_valid_values = old_values[:, :-1] * shifted_labels_mask
+                                print(f"old_valid_values shape: {old_valid_values.shape}, has NaN: {torch.isnan(old_valid_values).any().item()}, has Inf: {torch.isinf(old_valid_values).any().item()}")
+
+                                advantages, returns = self._compute_advantages(
+                                    old_valid_values, rewards, shifted_labels_mask
+                                )
+                                print(f"returns shape: {returns.shape}, has NaN: {torch.isnan(returns).any().item()}, has Inf: {torch.isinf(returns).any().item()}")
+
+                            else: # Handle case without critic
+                                if "advantages" in batch_device:
+                                    advantages = batch_device["advantages"][:, 1:] 
+                                else: print("Advantages missing from batch (and no critic)")
+
+                            if advantages is not None:
+                                print(f"advantages shape: {advantages.shape}, has NaN: {torch.isnan(advantages).any().item()}, has Inf: {torch.isinf(advantages).any().item()}")
+                            else: print("advantages: None or Missing")
+
+                    except Exception as e:
+                        print(f"Error during debug printing: {e}")
+                    print("--- End Debugging Prints ---\n")
+
+                labels = batch.get('labels')
+                if labels is None:
+                    logger.warning(f"[TracIn] Skipping example index {original_idx}, no 'labels' in batch.")
+                    continue
+
+                shifted_labels = labels[..., 1:].contiguous()
+                shifted_labels_mask = (shifted_labels != -100)
+                
+                if shifted_labels_mask.sum() == 0:
+                    logger.warning(f"[TracIn] Skipping example index {original_idx}, no response tokens (mask_sum=0).")
+                    influence_scores.append({
+                        "original_index": original_idx,
+                        "influence_score": 0.0,
+                        "ppo_loss": 0.0,
+                        "reward": batch.get('scores', torch.tensor([0.0])).item(), 
+                        "query": "SKIPPED_NO_RESPONSE",
+                        "response": "SKIPPED_NO_RESPONSE",
+                    })
+                    continue
+                # --- END: NEW FIX ---
+
                 g_train_i, train_loss_i = self._get_ppo_loss_and_grad_tracin(batch, actor_engine, critic_engine)
 
                 if g_train_i is None:
@@ -2274,7 +2380,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
                 # --- 3. Compute Influence ---
                 # Ensure gradients are detached before dot product
-                score = torch.dot(g_val.detach(), g_train_i.detach()).item()
+                score = torch.sum(g_val.detach() * g_train_i.detach()).item()
 
                 # --- Store results with Original Index ---
                 # Decode query and response - Need original token ids before collation

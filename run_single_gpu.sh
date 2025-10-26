@@ -41,4 +41,4 @@ deepspeed --no_local_rank --num_gpus=$NUM_GPUS   \
 echo "--- Experiment Complete ---"
 
 # chmod +x run_single_gpu.sh
-# ./run_single_gpu.sh
+# bash ./run_single_gpu.sh 2>&1 | tee my_experiment.log

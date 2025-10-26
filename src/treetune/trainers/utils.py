@@ -337,8 +337,15 @@ def monitor_tensor_anomalies(
     nan_mask = torch.isnan(tensor)
     inf_mask = torch.isinf(tensor)
 
-    # Mask NaN and Inf values to compute mean and std of the finite values only
-    finite_tensor = tensor[~nan_mask & ~inf_mask & mask]
+    bool_mask = mask.bool() 
+    combined_mask = ~nan_mask & ~inf_mask & bool_mask
+    # Cast the final combined mask to boolean for indexing
+    combined_mask = combined_mask.bool() 
+    print(f"DEBUG monitor: tensor shape={tensor.shape}, mask shape={mask.shape}, nan_mask shape={nan_mask.shape}, inf_mask shape={inf_mask.shape}")
+    print(f"DEBUG monitor: combined_mask shape={combined_mask.shape}, dtype={combined_mask.dtype}") # Should now be torch.bool
+    # --- END: Debug prints ---
+
+    finite_tensor = tensor[combined_mask]
 
     # Compute the mean and standard deviation of the finite values
     if finite_tensor.numel() == 0:
