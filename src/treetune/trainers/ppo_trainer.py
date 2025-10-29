@@ -4,6 +4,8 @@ from tqdm import tqdm # Already imported, ensure available
 from treetune.runtime.base_runtime import Runtime
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
+import random
+import torch.nn.utils.rnn as rnn_utils
 
 import json
 import logging
@@ -173,6 +175,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         move_reference_model_to_cpu: bool = False,
         save_hf_critic_checkpoint: bool = False,
         run_tracin_analysis: bool = True,
+        tracin_num_val_samples: int = 100,
         runtime: Optional["Runtime"] = None,
         **kwargs,
     ):
@@ -248,6 +251,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         self.report_entropy = report_entropy
         self.save_hf_critic_checkpoint = save_hf_critic_checkpoint
         self.run_tracin_analysis = run_tracin_analysis
+        self.tracin_num_val_samples = tracin_num_val_samples
 
         if self._has_critic_model() and disable_critic_training:
             logger.warning(
@@ -1984,7 +1988,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
         return flat_grads
 
-    def _prepare_validation_example_tracin(self):
+    def _prepare_validation_example_tracin(self, num_samples):
         """Prepares a single validation example for TracIn analysis."""
         if not hasattr(self, "runtime") or self.runtime is None: # Add a check just in case
             logger.error("Trainer's runtime object not found. Skipping TracIn prep.")
@@ -1999,81 +2003,146 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         try:
             # Use the first example from the 'train' split as our target
             # You can customize this to pick any example
-            val_example = task.get_datasets(split='train')[0]
+            dataset = task.get_datasets(split="test")
+            if dataset is None or len(dataset) == 0:
+                logger.warning(
+                    "[TracIn] No 'validation' split found, falling back to 'train' split for validation samples."
+                )
+                dataset = task.get_datasets(split="train")
+                if dataset is None or len(dataset) == 0:
+                    raise ValueError("No 'train' or 'validation' dataset found for TracIn.")
+                
+            if len(dataset) < num_samples:
+                logger.warning(
+                    f"[TracIn] Requested {num_samples} validation samples, but dataset only has {len(dataset)}. Using all."
+                )
+                sample_indices = range(len(dataset))
+                samples = [dataset[i] for i in sample_indices]
+            else:
+                sample_indices = random.sample(range(len(dataset)), num_samples)
+                samples = [dataset[i] for i in sample_indices]
 
-            query_text = val_example['question']
-            answer_text = val_example['answer'] # This is the GROUND TRUTH answer
+            logger.info(
+                f"[TracIn] Using {len(samples)} validation samples with indices (first 10): {sample_indices[:10]}..."
+            )
+
+            batched_input_ids = []
+            batched_labels = []
+            skipped_count = 0
 
             prompt_template = "<start_of_turn>user\n{question}<end_of_turn>\n<start_of_turn>assistant\n{answer}"
 
-            # Format using the prompt template
-            full_text = prompt_template.format(
-                question=query_text,
-                answer=answer_text
+            for example in samples:
+                try:
+                    print(f"Processing example: {example}")
+                    # Adapt these based on actual keys in your GSM8K dataset
+                    q_text = example.get('question', example.get('query', ''))
+                    # a_text = example.get('answer', example.get('response', ''))
+                    a_text = example.get('answer_without_calculator', example.get('answer', ''))
+
+                    if not isinstance(q_text, str) or not isinstance(a_text, str) or not a_text:
+                        logger.warning(f"[Error] Skipping sample due to invalid/empty format: {example}")
+                        skipped_count += 1
+                        continue
+
+                    full_text = prompt_template.format(question=q_text, answer=a_text)
+                    prompt_only_text = prompt_template.format(question=q_text, answer="") # For length calculation
+
+                    print(f"Full text: {full_text}")
+
+                    tokenized_output = tokenizer(
+                        full_text,
+                        return_tensors="pt",
+                        padding=False, # Pad later in the batch
+                        truncation=True,
+                    )
+                    input_ids = tokenized_output.input_ids[0]
+                    # print(f"full text check: {input_ids}")
+
+                    tokenized_query = tokenizer(
+                        prompt_only_text,
+                        return_tensors="pt",
+                        padding=False,
+                        truncation=True,
+                    )
+                    q_len = tokenized_query.input_ids[0].shape[0]
+                    mask_len = q_len
+                    # print(f"prompt_only_text check: {tokenized_query}")
+
+                    if tokenizer.bos_token_id is not None and input_ids[0] == tokenizer.bos_token_id:
+                        # If prompt tokenization *didn't* add BOS but full did, adjust
+                        if tokenized_query.input_ids[0][0] != tokenizer.bos_token_id:
+                            mask_len -=1 # Example adjustment, verify this logic
+
+                    labels = input_ids.clone()
+                    labels[:mask_len] = -100 # Mask prompt tokens up to the calculated length
+
+                    # Make sure we didn't mask everything
+                    if (labels == -100).all():
+                        logger.warning(f"[Error] All labels masked for sample. Query len: {q_len}, Mask len: {mask_len}, Total len: {input_ids.shape[0]}. Skipping.")
+                        skipped_count += 1
+                        continue
+
+                    batched_input_ids.append(input_ids)
+                    batched_labels.append(labels)
+
+                except Exception as e:
+                    logger.warning(f"[Error] Error processing validation sample: {e}. Sample: {example}")
+                    skipped_count += 1
+                    continue
+
+            if not batched_input_ids:
+                raise RuntimeError("[Error] Failed to prepare ANY validation samples.")
+
+            if skipped_count > 0:
+                logger.warning(f"[Error] Skipped {skipped_count} validation samples during preparation.")
+
+            pad_token_id_to_use = tokenizer.pad_token_id
+            if pad_token_id_to_use is None:
+                pad_token_id_to_use = tokenizer.eos_token_id
+                logger.warning(f"[TracIn] tokenizer.pad_token_id is None. Using tokenizer.eos_token_id ({pad_token_id_to_use}) for padding instead.")
+                if pad_token_id_to_use is None:
+                     raise ValueError("[Error] Both pad_token_id and eos_token_id are None. Cannot pad sequences.") # Add extra check
+
+            # --- Manual Padding ---
+            padded_input_ids = rnn_utils.pad_sequence(
+                batched_input_ids,
+                batch_first=True,
+                padding_value=pad_token_id_to_use,
             )
-
-            tokenized = tokenizer(
-                full_text,
-                return_tensors='pt',
-                truncation=True,
+            padded_labels = rnn_utils.pad_sequence(
+                batched_labels,
+                batch_first=True,
+                padding_value=-100, # Pad labels with ignore_index
             )
-
-            input_ids = tokenized.input_ids.to(self.distributed_state.device)
-            attention_mask = tokenized.attention_mask.to(self.distributed_state.device)
-
-            # --- SFT Loss Label Preparation ---
-            # Labels are input_ids shifted
-            labels = input_ids.clone()
-            # We need to mask out the query part for the loss
-
-            # Re-tokenize only the prompt part to find its length
-            prompt_text = prompt_template.format(
-                question=query_text,
-                answer="" # Empty answer
-            )
-            # Important: Add eos_token if the original template adds it, to match tokenization
-            # Check if template usually ends with eos_token; adapt as needed. Assuming it doesn't here.
-            query_tokenized = tokenizer(
-                prompt_text,
-                return_tensors='pt',
-                add_special_tokens=True # Ensure BOS token is included if usually present
-            )
-
-            # Calculate query length *including special tokens* like BOS
-            # The length to mask is the length of the prompt tokens
-            query_len = query_tokenized.input_ids.shape[1]
-
-            # Mask labels up to the end of the prompt (exclusive of the first answer token)
-            labels[:, :query_len] = -100 # Mask prompt tokens
-
-            # Ensure the last token is also masked if it's padding or EOS after answer
-            # This depends on how the tokenizer handles the full_text
-            # A simple approach: mask based on attention mask
-            labels[attention_mask == 0] = -100
-
-            # Verify: Make sure we are not masking the entire sequence
-            if (labels == -100).all():
-                logger.warning(f"[TracIn] All labels masked out for val example. Check prompt/answer lengths and max_seq_len. Query len: {query_len}, Total len: {input_ids.shape[1]}")
-                return None
+            # Create attention mask based on padded input_ids
+            attention_mask = padded_input_ids.ne(pad_token_id_to_use).long()
 
 
             return {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels
+                "input_ids": padded_input_ids.to(self.distributed_state.device),
+                "labels": padded_labels.to(self.distributed_state.device),
+                "attention_mask": attention_mask.to(self.distributed_state.device)
             }
 
         except Exception as e:
-            logger.error(f"Failed to prepare validation example for TracIn: {e}", exc_info=True)
+            logger.error(f"[Error] Failed during validation sample preparation: {e}", exc_info=True)
             return None
+
+
+
 
     def _get_sft_loss_and_grad_tracin(
         self,
         val_batch: Dict[str, torch.Tensor],
         actor_engine: DeepSpeedEngine,
-        critic_engine: Optional[DeepSpeedEngine]
-        ):
-        """Calculates SFT loss and gradient for the validation batch."""
+        critic_engine: Optional[DeepSpeedEngine] # Keep critic engine for grad flattening consistency
+    ) -> Tuple[Optional[torch.Tensor], float]:
+        """
+        MODIFIED:
+        Calculates the SFT (Cross-Entropy) loss and the AVERAGE gradient
+        across the provided validation batch.
+        """
         if val_batch is None:
             return None, 0.0
 
@@ -2081,46 +2150,67 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         if critic_engine:
             critic_engine.train()
 
-        # Zero gradients for ALL trainable models
+        # Zero gradients for ALL trainable models involved in TracIn
         actor_engine.zero_grad()
-        if critic_engine:
-             critic_engine.zero_grad()
-
+        if critic_engine and not self.disable_critic_training: # Only zero critic if it's trainable
+            critic_engine.zero_grad()
 
         # --- Calculate SFT Loss (Cross-Entropy) ---
         # Forward pass ONLY through the ACTOR model
-        outputs = actor_engine(
-            input_ids=val_batch['input_ids'],
-            attention_mask=val_batch['attention_mask'],
-            return_dict=True,
-            use_cache=False
-        )
-        logits = outputs.logits
+        try:
+            outputs = actor_engine(
+                input_ids=val_batch['input_ids'],
+                attention_mask=val_batch['attention_mask'],
+                return_dict=True,
+                use_cache=False
+            )
+            logits = outputs.logits
 
-        # Shift logits and labels for CrossEntropyLoss
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = val_batch['labels'][..., 1:].contiguous()
+            # Shift logits and labels for CrossEntropyLoss
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = val_batch['labels'][..., 1:].contiguous()
 
-        # Calculate loss only on non-masked tokens
-        loss_fct = CrossEntropyLoss(ignore_index=-100)
-        vocab_size = shift_logits.shape[-1]
-        loss = loss_fct(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+            # Calculate loss only on non-masked tokens (average over the batch)
+            loss_fct = CrossEntropyLoss(ignore_index=-100) # Reduction='mean' is default
+            vocab_size = shift_logits.shape[-1]
+            loss = loss_fct(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+
+            # Check for NaN/Inf loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error("[Error] SFT validation loss is NaN or Inf. Cannot compute gradient.")
+                return None, loss.item() # Return the problematic loss value
+
+        except Exception as e:
+            logger.error(f"[Error] Error during SFT forward/loss calculation: {e}", exc_info=True)
+            return None, 0.0 # Indicate failure
         # --- End SFT Loss Calculation ---
 
+        # --- Backward Pass ---
+        try:
+            # Backward pass using DeepSpeed Engine. This computes the gradient averaged over the batch.
+            actor_engine.backward(loss)
+            # Note: Critic grads will remain zero if critic wasn't involved in forward pass / loss calc.
 
-        # Backward pass using DeepSpeed Engine
-        actor_engine.backward(loss)
-        # Note: Critic grads will remain zero, which is correct for SFT loss
+        except Exception as e:
+            logger.error(f"[Error] Error during SFT backward pass: {e}", exc_info=True)
+            # Attempt to zero grads anyway before returning failure
+            actor_engine.zero_grad()
+            if critic_engine and not self.disable_critic_training: critic_engine.zero_grad()
+            return None, loss.item() # Return loss, but signal grad failure
+        # --- End Backward Pass ---
 
-        # Flatten gradients from *both* models
-        g_val = self._get_flat_gradients_tracin(actor_engine, critic_engine, zero_grad=True) # Zero grads inside helper
 
-        # Check for empty gradient (might happen if loss is zero or no params require grad)
-        if g_val is None or g_val.numel() == 0:
-             logger.warning("[TracIn] Validation gradient is empty. Check model setup or loss value.")
-             return None, loss.item() # Return loss even if grad is empty
+        # --- Gradient Flattening ---
+        # Flatten gradients from *both* models for consistency with PPO grad calculation
+        # Pass zero_grad=True to handle zeroing within the helper
+        g_val_avg = self._get_flat_gradients_tracin(actor_engine, critic_engine, zero_grad=True)
 
-        return g_val, loss.item()
+        # Check for empty gradient
+        if g_val_avg is None or g_val_avg.numel() == 0:
+            logger.warning("[Error] Average validation gradient is empty. Check model setup or loss value.")
+            return None, loss.item() # Return loss even if grad is empty
+
+        return g_val_avg.detach(), loss.item() # Return detached gradient and loss
 
 
     def _get_ppo_loss_and_grad_tracin(
@@ -2217,189 +2307,125 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         return g_train, loss.item()
 
     def _run_tracin_analysis(
-          self,
-          episodes_dataset: Dataset,
-          iteration: int,
-          actor_engine: DeepSpeedEngine, # Pass engines
-          critic_engine: Optional[DeepSpeedEngine]
+        self,
+        episodes_dataset: Dataset,
+        iteration: int,
+        actor_engine: DeepSpeedEngine, # Pass engines
+        critic_engine: Optional[DeepSpeedEngine]
         ):
-        """Runs the full TracIn analysis for the current iteration."""
-        # Ensure tokenizer is available (might need to load it if not cached)
-        # Assuming runtime/task is accessible as in _prepare_validation_example_tracin
-        if not hasattr(self, "runtime") or self.runtime is None: # Add a check just in case
-            logger.error("Trainer's runtime object not found. Skipping TracIn analysis.")
+        """
+        MODIFIED:
+        Runs the full TracIn analysis for the current iteration, using an
+        average gradient over multiple validation samples.
+        """
+        # Ensure tokenizer is available
+        if not hasattr(self, "runtime") or self.runtime is None:
+            logger.error("[Error] Trainer's runtime object not found. Skipping TracIn analysis.")
             return
         if not hasattr(self.runtime, "tokenizer"):
-            logger.error("[TracIn] Tokenizer not found on runtime. Cannot decode results.")
+            logger.error("[Error] Tokenizer not found on runtime. Cannot decode results.")
             return
         tokenizer = self.runtime.tokenizer
 
         try:
-            # --- 1. Calculate Validation Gradient (G_val) ---
-            logger.info("[TracIn] Preparing validation example...")
-            val_batch = self._prepare_validation_example_tracin()
+            # --- 1. Calculate AVERAGE Validation Gradient (G_val_avg) ---
+            logger.info(f"[TracIn] Preparing {self.tracin_num_val_samples} validation samples...")
+            # Call the modified preparation function
+            val_batch = self._prepare_validation_example_tracin(self.tracin_num_val_samples)
             if val_batch is None:
-                logger.error("[TracIn] Could not prepare validation example. Aborting.")
+                logger.error("[Error] Could not prepare validation batch. Aborting.")
                 return
 
-            logger.info("[TracIn] Calculating validation gradient (G_val)...")
-            g_val, val_loss = self._get_sft_loss_and_grad_tracin(val_batch, actor_engine, critic_engine)
+            logger.info("[TracIn] Calculating average validation gradient (G_val_avg)...")
+            # Call the modified gradient function
+            g_val_avg, avg_val_loss = self._get_sft_loss_and_grad_tracin(val_batch, actor_engine, critic_engine)
 
-            if g_val is None:
-                logger.error("[TracIn] Validation gradient calculation failed. Aborting.")
+            if g_val_avg is None:
+                logger.error("[Error] Average validation gradient calculation failed. Aborting.")
                 return
 
-            logger.info(f"[TracIn] G_val shape: {g_val.shape}, Val Loss: {val_loss}")
+            logger.info(f"[TracIn] G_val_avg shape: {g_val_avg.shape}, Avg Val Loss: {avg_val_loss:.4f}")
 
-            # --- 2. Calculate Training Gradients (G_train_i) ---
-            logger.info("[TracIn] Calculating training gradients (G_train_i)...")
+            # --- 2. Calculate Training Gradients (G_train_i) & Influence ---
+            logger.info("[TracIn] Calculating training gradients (G_train_i) and influence scores...")
 
-            # We need a DataLoader to iterate *without* distributed sampling
-            # Use standard PPODataCollator, batch size MUST be 1
             data_collator = PPODataCollator()
             dataloader = DataLoader(
-                episodes_dataset, # Dataset already on device from pre-calc? Check original code. Assume needs .to(device) if not.
-                batch_size=1, # Per-record gradients require batch size 1
-                shuffle=False, # Maintain order to map back results
+                episodes_dataset,
+                batch_size=1, # Still need batch size 1 for individual training gradients
+                shuffle=False,
                 collate_fn=data_collator,
-                # Consider num_workers=0 if encountering issues with multiprocessing and DeepSpeed
                 num_workers=self.args.dataloader_num_workers,
                 pin_memory=self.args.dataloader_pin_memory,
             )
 
             influence_scores = []
+            original_indices = list(range(len(episodes_dataset))) # Keep track if dataloader shuffles unexpectedly
 
             pbar = tqdm(
                 dataloader,
                 desc=f"[TracIn] Iter {iteration} G_train_i",
-                disable=not self._is_main_process() # Already on main process, but safe check
+                disable=False # Should only run on main process anyway
             )
 
-            # Ensure models stay in train mode throughout the loop
+            # Ensure models stay in train mode
             actor_engine.train()
             if critic_engine: critic_engine.train()
 
-            original_indices = list(range(len(episodes_dataset))) # Keep track of original indices
-
             for i, batch in enumerate(pbar):
-                # Get the original index for this item
-                original_idx = original_indices[i] # Assumes dataloader preserves order
+                original_idx = original_indices[i]
 
-                if i == 0: # Only print for the first batch where it seems to crash
-                    print(f"\n--- Debugging TracIn Batch Index: {original_idx} ---")
-                    try:
-                        # Move batch to device early for inspection
-                        batch_device = {k: v.to(actor_engine.device) for k, v in batch.items()}
-
-                        print(f"Batch keys: {list(batch_device.keys())}")
-                        print(f"input_ids shape: {batch_device.get('input_ids', 'N/A')}")
-                        if 'input_ids' in batch_device: print(f"input_ids shape: {batch_device['input_ids'].shape}")
-                        if 'attention_mask' in batch_device: print(f"attention_mask shape: {batch_device['attention_mask'].shape}")
-                        if 'labels' in batch_device: print(f"labels shape: {batch_device['labels'].shape}")
-
-                        shifted_labels = batch_device['labels'][..., 1:].contiguous()
-                        shifted_labels_mask = (shifted_labels != -100).to(batch_device['attention_mask'].dtype)
-                        print(f"shifted_labels_mask shape: {shifted_labels_mask.shape}, sum: {shifted_labels_mask.sum().item()}")
-
-                        old_logprobs = batch_device[COLUMN_ACTOR_SHIFTED_LOGPS]
-                        print(f"old_logprobs shape: {old_logprobs.shape}, has NaN: {torch.isnan(old_logprobs).any().item()}, has Inf: {torch.isinf(old_logprobs).any().item()}")
-
-                        ref_logprobs = batch_device.get(COLUMN_REF_SHIFTED_LOGPS, None)
-                        if ref_logprobs is not None:
-                            print(f"ref_logprobs shape: {ref_logprobs.shape}, has NaN: {torch.isnan(ref_logprobs).any().item()}, has Inf: {torch.isinf(ref_logprobs).any().item()}")
-                        else: print("ref_logprobs: None")
-
-                        # Recompute advantages/returns for inspection (inside no_grad context)
-                        with torch.no_grad():
-                            rewards, _, _ = self._compute_rewards(
-                                batch_device['scores'], old_logprobs, ref_logprobs, batch_device['attention_mask']
-                            )
-                            print(f"rewards shape: {rewards.shape}, has NaN: {torch.isnan(rewards).any().item()}, has Inf: {torch.isinf(rewards).any().item()}")
-
-                            advantages = None
-                            returns = None
-                            old_valid_values = None
-
-                            if self._has_critic_model():
-                                old_values = batch_device[COLUMN_VALUES]
-                                old_valid_values = old_values[:, :-1] * shifted_labels_mask
-                                print(f"old_valid_values shape: {old_valid_values.shape}, has NaN: {torch.isnan(old_valid_values).any().item()}, has Inf: {torch.isinf(old_valid_values).any().item()}")
-
-                                advantages, returns = self._compute_advantages(
-                                    old_valid_values, rewards, shifted_labels_mask
-                                )
-                                print(f"returns shape: {returns.shape}, has NaN: {torch.isnan(returns).any().item()}, has Inf: {torch.isinf(returns).any().item()}")
-
-                            else: # Handle case without critic
-                                if "advantages" in batch_device:
-                                    advantages = batch_device["advantages"][:, 1:] 
-                                else: print("Advantages missing from batch (and no critic)")
-
-                            if advantages is not None:
-                                print(f"advantages shape: {advantages.shape}, has NaN: {torch.isnan(advantages).any().item()}, has Inf: {torch.isinf(advantages).any().item()}")
-                            else: print("advantages: None or Missing")
-
-                    except Exception as e:
-                        print(f"Error during debug printing: {e}")
-                    print("--- End Debugging Prints ---\n")
-
+                # --- Skip check (same as before) ---
                 labels = batch.get('labels')
                 if labels is None:
-                    logger.warning(f"[TracIn] Skipping example index {original_idx}, no 'labels' in batch.")
+                    logger.warning(f"[Error] Skipping example index {original_idx}, no 'labels' in batch.")
                     continue
-
                 shifted_labels = labels[..., 1:].contiguous()
                 shifted_labels_mask = (shifted_labels != -100)
-                
                 if shifted_labels_mask.sum() == 0:
-                    logger.warning(f"[TracIn] Skipping example index {original_idx}, no response tokens (mask_sum=0).")
+                    logger.warning(f"[Error] Skipping example index {original_idx}, no response tokens (mask_sum=0).")
                     influence_scores.append({
-                        "original_index": original_idx,
-                        "influence_score": 0.0,
-                        "ppo_loss": 0.0,
-                        "reward": batch.get('scores', torch.tensor([0.0])).item(), 
-                        "query": "SKIPPED_NO_RESPONSE",
-                        "response": "SKIPPED_NO_RESPONSE",
+                        "original_index": original_idx, "influence_score": 0.0, "ppo_loss": 0.0,
+                        "reward": batch.get('scores', torch.tensor([0.0])).item(),
+                        "query": "SKIPPED_NO_RESPONSE", "response": "SKIPPED_NO_RESPONSE",
                     })
                     continue
-                # --- END: NEW FIX ---
+                # --- End Skip Check ---
 
+                # Calculate PPO gradient for this single training sample
                 g_train_i, train_loss_i = self._get_ppo_loss_and_grad_tracin(batch, actor_engine, critic_engine)
 
                 if g_train_i is None:
-                    logger.warning(f"[TracIn] Skipping empty gradient for train example index {original_idx}")
+                    logger.warning(f"[Error] Skipping empty gradient for train example index {original_idx}")
                     influence_scores.append({
-                        "original_index": original_idx,
-                        "influence_score": 0.0, # Or None/NaN?
+                        "original_index": original_idx, "influence_score": 0.0, # Or None/NaN?
                         "ppo_loss": train_loss_i,
-                        "reward": batch.get('scores', torch.tensor([0.0])).item(), # Safely get score
-                        "query": "GRADIENT_CALC_FAILED",
-                        "response": "GRADIENT_CALC_FAILED",
+                        "reward": batch.get('scores', torch.tensor([0.0])).item(),
+                        "query": "GRADIENT_CALC_FAILED", "response": "GRADIENT_CALC_FAILED",
                     })
                     continue
 
-                # --- 3. Compute Influence ---
-                # Ensure gradients are detached before dot product
-                score = torch.sum(g_val.detach() * g_train_i.detach()).item()
+                # --- 3. Compute Influence using AVERAGE G_val ---
+                # Dot product between individual G_train_i and the average G_val_avg
+                score = torch.sum(g_val_avg.detach() * g_train_i.detach()).item() # <-- Use g_val_avg here
 
-                # --- Store results with Original Index ---
-                # Decode query and response - Need original token ids before collation
-                # Accessing original data might require fetching from `episodes_dataset` by index
+                # --- Store results (same decoding logic as before) ---
                 try:
-                     original_record = episodes_dataset[original_idx]
-                     query_tokens = original_record['query_token_ids']
-                     response_tokens = original_record['response_token_ids']
-                     query_text = tokenizer.decode(query_tokens, skip_special_tokens=True)
-                     response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
-                     reward_val = original_record['scores'] # Get original score
+                    original_record = episodes_dataset[original_idx]
+                    print(f"original_record: {original_record}")
+                    query_tokens = original_record['query_token_ids']
+                    response_tokens = original_record['response_token_ids']
+                    query_text = tokenizer.decode(query_tokens, skip_special_tokens=True)
+                    response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
+                    reward_val = original_record['scores']
                 except Exception as e:
-                     logger.warning(f"[TracIn] Failed to decode text for index {original_idx}: {e}")
-                     query_text = f"DECODING_FAILED_{original_idx}"
-                     response_text = f"DECODING_FAILED_{original_idx}"
-                     reward_val = batch.get('scores', torch.tensor([0.0])).item() # Fallback
+                    logger.warning(f"[Error] Failed to decode text for index {original_idx}: {e}")
+                    query_text = f"DECODING_FAILED_{original_idx}"
+                    response_text = f"DECODING_FAILED_{original_idx}"
+                    reward_val = batch.get('scores', torch.tensor([0.0])).item() # Fallback
 
                 influence_scores.append({
-                    "original_index": original_idx, # Store original index
+                    "original_index": original_idx,
                     "influence_score": score,
                     "ppo_loss": train_loss_i,
                     "reward": reward_val,
@@ -2407,15 +2433,12 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                     "response": response_text,
                 })
 
-            # --- 4. Save Results ---
+            # --- 4. Save Results (similar logic, updated description) ---
             logger.info("[TracIn] Saving influence scores...")
-
             influence_scores.sort(key=lambda x: x['influence_score'], reverse=True)
 
-            # Use experiment_root from the Trainer base class for output path
             output_dir = self.experiment_root / "tracin_analysis"
             output_dir.mkdir(parents=True, exist_ok=True)
-
             results_path = output_dir / f"tracin_results_iter_{iteration}.json"
 
             try:
@@ -2423,11 +2446,11 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                     json.dump(
                         {
                             "iteration": iteration,
-                            "validation_target": "First training example (SFT Loss)", # Describe target
-                            "validation_loss": val_loss,
-                            "proponents": influence_scores[:50], # Save more examples
-                            "opponents": influence_scores[-50:], # Save more examples
-                            # "all_scores": influence_scores # Uncomment carefully - large file!
+                            # <-- MODIFIED description
+                            "validation_target": f"Average over {self.tracin_num_val_samples} random validation samples (SFT Loss)",
+                            "average_validation_loss": avg_val_loss, # <-- Use avg loss
+                            "proponents": influence_scores[:50],
+                            "opponents": influence_scores[-50:],
                         },
                         f,
                         indent=2
@@ -2439,12 +2462,11 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         except Exception as e:
             logger.error(f"[TracIn] Error during analysis: {e}", exc_info=True)
         finally:
-            # Ensure models are back in training mode if needed later
-            # (though they should already be if no errors occurred)
+            # Ensure models are back in training mode
             actor_engine.train()
             if critic_engine: critic_engine.train()
-            # No dataset format changes needed for this version
 
+    # --- END: MODIFIED TracIn HELPER METHODS ---
     # --- END: NEW TracIn HELPER METHODS ---
 
     def _init_reference_model(
