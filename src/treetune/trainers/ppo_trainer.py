@@ -2003,7 +2003,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         try:
             # Use the first example from the 'train' split as our target
             # You can customize this to pick any example
-            dataset = task.get_datasets(split="test")
+            dataset = task.get_datasets(split="validation")
             if dataset is None or len(dataset) == 0:
                 logger.warning(
                     "[TracIn] No 'validation' split found, falling back to 'train' split for validation samples."

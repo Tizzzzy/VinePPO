@@ -85,6 +85,41 @@ class Task(Registrable):
             raise ValueError(
                 f"Expected a DatasetDict, but got {type(data_source)} instead"
             )
+        
+        if "validation" not in data_source and "train" in data_source:
+            logger.info("No 'validation' split found. Creating one from the 'train' split.")
+            
+            # User requested 1000 samples for the new validation set
+            val_size = 1000 
+            
+            if len(data_source["train"]) > val_size:
+                # Create the 90/10 split
+                split_result = data_source["train"].train_test_split(
+                    test_size=val_size, # 1000 samples for validation
+                    shuffle=True, 
+                    seed=42 # Use a fixed seed for reproducibility
+                )
+                
+                # Re-assign the splits
+                data_source["train"] = split_result["train"] # This is now the *remaining* training data
+                data_source["validation"] = split_result["test"] # This is the new 1000-sample validation set
+                
+                logger.info(f"Created new 'validation' split with {len(data_source['validation'])} samples.")
+                logger.info(f"Remaining 'train' split size: {len(data_source['train'])}.")
+            else:
+                logger.warning(
+                    f"Training set size ({len(data_source['train'])}) is not large enough to create a "
+                    f"validation split of {val_size}. Using 10% instead."
+                )
+                # Fallback if the training set is smaller than 1000
+                split_result = data_source["train"].train_test_split(
+                    test_size=0.1, # 10% fallback
+                    shuffle=True, 
+                    seed=42
+                )
+                data_source["train"] = split_result["train"]
+                data_source["validation"] = split_result["test"]
+        # --- END OF PROPOSED CHANGE ---
 
         if self.field_map is not None:
 
