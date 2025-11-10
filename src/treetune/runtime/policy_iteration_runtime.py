@@ -32,6 +32,15 @@ from treetune.trainers.base_trainer import Trainer
 from treetune.trainers.deepspeed_policy_trainer import DeepSpeedPolicyTrainer
 from treetune.trainers.policy_trainer import PolicyTrainer
 
+# --- START MODIFICATION 1 ---
+# Import the custom exception
+try:
+    from treetune.trainers.ppo_trainer import StopTrainingError
+except ImportError:
+    # Define a fallback in case of circular import issues
+    class StopTrainingError(Exception): pass
+# --- END MODIFICATION 1 ---
+
 logger = get_logger(__name__)
 
 
@@ -233,7 +242,26 @@ class PolicyIterationRuntime(DistributedRuntime):
             self.distributed_state.wait_for_everyone()
 
             t0 = time.time()
-            latest_policy_path = trainer.step(episodes)
+
+            # latest_policy_path = trainer.step(episodes)
+
+            # Modified logic:
+            new_policy_path = trainer.step(episodes)
+            
+            if new_policy_path is not None:
+                # Training was successful, update the policy
+                latest_policy_path = new_policy_path
+                if is_local_main_process: 
+                    logger.info(f"Iteration {iteration} complete. New policy saved at: {latest_policy_path}")
+            else:
+                # Training was skipped (e.g., no positive data), reuse the old policy
+                if is_local_main_process:
+                    logger.warning(
+                        f"Trainer.step() returned None for iteration {iteration} (likely due to no positive data). "
+                        f"Re-using previous policy path for next iteration: {latest_policy_path}"
+                    )
+            # --- END MODIFICATION ---
+
             self._cloud_log({"timing/total/training_step": time.time() - t0})
 
             assert (

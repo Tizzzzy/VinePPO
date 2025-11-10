@@ -3,7 +3,7 @@
 # --- 1. Set Configuration Variables ---
 echo "Setting up configuration..."
 
-export MASTER_PORT=31337
+# export MASTER_PORT=29501
 
 # Set the base config for Rho PPO on GSM8K + single GPU config
 export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
@@ -28,13 +28,13 @@ echo "Found $NUM_GPUS GPU(s)."
 
 # 1. Run the training
 echo "--- Starting Training ---"
-deepspeed --no_local_rank --num_gpus=$NUM_GPUS  \
+deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501 \
          src/treetune/main.py --configs "$CONFIGSTR" \
             run_iteration_loop
 
 # 2. Run the evaluation
 echo "--- Starting Evaluation ---"
-deepspeed --no_local_rank --num_gpus=$NUM_GPUS   \
+deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501  \
          src/treetune/main.py --configs "$CONFIGSTR" \
             run_evaluation
 

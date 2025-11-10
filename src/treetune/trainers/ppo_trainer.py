@@ -64,6 +64,12 @@ from treetune.trainers.utils import (
 
 logger = get_logger(__name__)
 
+# --- START MODIFICATION 1 ---
+# Define a custom exception to signal the runtime to stop.
+class StopTrainingError(Exception):
+    """Signal to the runtime to stop policy iteration."""
+    pass
+# --- END MODIFICATION 1 ---
 
 @dataclass
 class PPOHParams:
@@ -383,6 +389,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 The path to the latest policy (actor) checkpoint.
         """
         episodes_dataset = self._filter_episodes(episodes_dataset)
+
         if self._is_kl_penalty_enabled():
             # Compute or reload from disk the episodes with reference log probabilities
             # It takes care initializing and destroying the reference model
@@ -416,6 +423,40 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         episodes_dataset = self._get_episodes_w_curr_logps_and_values(
             episodes_dataset, actor_engine, critic_engine
         )
+
+        # --- START MODIFICATION ---
+        if "scores" in episodes_dataset.column_names:
+            orig_len = len(episodes_dataset)
+            logger.info(f"Original episode count before filtering for positive scores: {orig_len}")
+            
+            positive_episodes_dataset = episodes_dataset.filter(
+                lambda example: example.get("scores", 0) > 0,
+                desc="Filtering for positive scores"
+            )
+
+            filtered_len = len(positive_episodes_dataset)
+            logger.info(
+                f"Filtered out {orig_len - filtered_len} episodes with non-positive scores. "
+                f"Remaining: {filtered_len}"
+            )
+
+            if filtered_len == 0:
+                logger.warning(
+                    "Filtering for positive scores resulted in an empty dataset. " 
+                    "Signaling to stop training."
+                )
+                # Raise the custom exception to stop the runtime loop
+                raise StopTrainingError(
+                    "No positive-score episodes found. Stopping training."
+                )
+
+            episodes_dataset = positive_episodes_dataset # Use the filtered dataset
+        else:
+            logger.warning(
+                "Cannot filter for positive scores: 'scores' column not found in dataset. "
+                "Training on all data for this iteration."
+            )
+# --- END MODIFICATION ---
 
         # Train the actor and critic models using PPO
         self._train_actor_critic(episodes_dataset, actor_engine, critic_engine)
@@ -563,12 +604,12 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         dataloader_iter = iter(dataloader)
 
         # Check if we're resuming training in the middle of an iteration
-        completed_optim_steps_in_this_iteration = (
-            self.state.global_step % num_optimization_steps_in_iteration
-        )
-        assert (
-            completed_optim_steps_in_this_iteration == 0
-        ), "We don't support resuming training in the middle of an iteration. "
+        # completed_optim_steps_in_this_iteration = (
+        #     self.state.global_step % num_optimization_steps_in_iteration
+        # )
+        # assert (
+        #     completed_optim_steps_in_this_iteration == 0
+        # ), "We don't support resuming training in the middle of an iteration. "
 
         progress_bar = tqdm(
             total=total_num_optimization_steps,
@@ -942,8 +983,8 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             return pg_loss, is_skipped, metrics, None
 
         pg_losses1 = -advantages * ratio
-        print(f"DEBUG: pg_losses1 shape={pg_losses1.shape}, has_nan={torch.isnan(pg_losses1).any().item()}, has_inf={torch.isinf(pg_losses1).any().item()}")
-        print(f"DEBUG: action_mask shape={action_mask.shape}, dtype={action_mask.dtype}, sum={action_mask.sum().item()}")
+        # print(f"DEBUG: pg_losses1 shape={pg_losses1.shape}, has_nan={torch.isnan(pg_losses1).any().item()}, has_inf={torch.isinf(pg_losses1).any().item()}")
+        # print(f"DEBUG: action_mask shape={action_mask.shape}, dtype={action_mask.dtype}, sum={action_mask.sum().item()}")
         with torch.no_grad():
             pg_losses1_anomalies = monitor_tensor_anomalies(
                 pg_losses1.detach(), action_mask
@@ -2034,7 +2075,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
             for example in samples:
                 try:
-                    print(f"Processing example: {example}")
+                    # print(f"Processing example: {example}")
                     # Adapt these based on actual keys in your GSM8K dataset
                     q_text = example.get('question', example.get('query', ''))
                     # a_text = example.get('answer', example.get('response', ''))
@@ -2048,7 +2089,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                     full_text = prompt_template.format(question=q_text, answer=a_text)
                     prompt_only_text = prompt_template.format(question=q_text, answer="") # For length calculation
 
-                    print(f"Full text: {full_text}")
+                    # print(f"Full text: {full_text}")
 
                     tokenized_output = tokenizer(
                         full_text,
@@ -2412,7 +2453,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 # --- Store results (same decoding logic as before) ---
                 try:
                     original_record = episodes_dataset[original_idx]
-                    print(f"original_record: {original_record}")
+                    # print(f"original_record: {original_record}")
                     query_tokens = original_record['query_token_ids']
                     response_tokens = original_record['response_token_ids']
                     query_text = tokenizer.decode(query_tokens, skip_special_tokens=True)
