@@ -6,8 +6,10 @@ echo "Setting up configuration..."
 # export MASTER_PORT=29501
 
 # Set the base config for Rho PPO on GSM8K + single GPU config
+# export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
+# configs/trainers/devBz16.jsonnet"
 export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
-configs/trainers/devBz16.jsonnet"
+configs/trainers/devBz8.jsonnet"
 
 # Set your desired output directory
 export APP_DIRECTORY="experiments/rho_ppo_gsm8k_single_gpu"
@@ -17,7 +19,7 @@ export APP_SEED="2746318213"
 
 # Optional: Set this if you use Weights & Biases.
 # If not, you can delete this line.
-export WANDB_RUN_ID="1b4a3ed40eeaae71d5f0fbbd8a220395978e7520"
+# export WANDB_RUN_ID="1b4a3ed40eeaae71d5f0fbbd8a220395978e7520"
 
 
 # --- 2. Run the Experiment ---
@@ -27,7 +29,7 @@ NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 echo "Found $NUM_GPUS GPU(s)."
 
 # 1. Run the training
-echo "--- Starting Training ---"
+# echo "--- Starting Training ---"
 deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501 \
          src/treetune/main.py --configs "$CONFIGSTR" \
             run_iteration_loop

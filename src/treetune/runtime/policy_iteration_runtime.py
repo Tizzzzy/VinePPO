@@ -246,20 +246,24 @@ class PolicyIterationRuntime(DistributedRuntime):
             # latest_policy_path = trainer.step(episodes)
 
             # Modified logic:
-            new_policy_path = trainer.step(episodes)
-            
-            if new_policy_path is not None:
-                # Training was successful, update the policy
+            try:
+                # trainer.step() will either return a new path or raise StopTrainingError
+                new_policy_path = trainer.step(episodes)
+
+                # If trainer.step() succeeds, update the policy path
                 latest_policy_path = new_policy_path
+                
                 if is_local_main_process: 
                     logger.info(f"Iteration {iteration} complete. New policy saved at: {latest_policy_path}")
-            else:
-                # Training was skipped (e.g., no positive data), reuse the old policy
+
+            except StopTrainingError as e:
+                # This block executes if ppo_trainer.py raises the error (e.g., empty dataset)
                 if is_local_main_process:
                     logger.warning(
-                        f"Trainer.step() returned None for iteration {iteration} (likely due to no positive data). "
-                        f"Re-using previous policy path for next iteration: {latest_policy_path}"
+                        f"Stopping policy iteration loop at iteration {iteration} due to: {e}"
                     )
+                # Break out of the for-loop to stop training gracefully
+                break
             # --- END MODIFICATION ---
 
             self._cloud_log({"timing/total/training_step": time.time() - t0})

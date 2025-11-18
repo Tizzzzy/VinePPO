@@ -10,7 +10,7 @@ local math_task = (import 'tasks/math_inplace_no_answer_prefix.jsonnet') + {
     ensure_fit_in_context_size: false,
 };
 
-local num_episodes_per_iteration = 512;
+local num_episodes_per_iteration = 256;
 local num_rollouts_per_sample = 8;
 local num_dataset_samples_per_iteration = num_episodes_per_iteration / num_rollouts_per_sample;
 local total_num_iterations = 1000;
@@ -36,7 +36,7 @@ local sampling_temperature = 0.6;
         dataset_num_samples_per_iteration: num_dataset_samples_per_iteration,
         total_num_iterations: $.num_iterations,
 
-        vllm_server+: { swap_space: 8, max_num_seqs: 512 },
+        vllm_server+: { swap_space: 8, max_num_seqs: 256 },
         vllm_min_available_gpu_memory_mb: 10 * 1024,
 
         inference_strategy: {
@@ -149,7 +149,7 @@ local sampling_temperature = 0.6;
 
             reward_function: $.episode_generator.reward_function,
 
-            max_num_requests: 512,
+            max_num_requests: 256,
             max_num_states: 256,
 
             append_bos_to_query: $.episode_generator.append_bos_to_query,
