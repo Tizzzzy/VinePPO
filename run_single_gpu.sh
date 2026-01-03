@@ -9,7 +9,7 @@ echo "Setting up configuration..."
 # export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
 # configs/trainers/devBz16.jsonnet"
 export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
-configs/trainers/devBz8.jsonnet"
+configs/trainers/devBz2.jsonnet"
 
 # Set your desired output directory
 export APP_DIRECTORY="experiments/rho_ppo_gsm8k_single_gpu"
@@ -19,7 +19,7 @@ export APP_SEED="2746318213"
 
 # Optional: Set this if you use Weights & Biases.
 # If not, you can delete this line.
-# export WANDB_RUN_ID="1b4a3ed40eeaae71d5f0fbbd8a220395978e7520"
+export WANDB_RUN_ID="1b4a3ed40eeaae71d5f0fbbd8a220395978e7520"
 
 
 # --- 2. Run the Experiment ---
