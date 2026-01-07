@@ -40,9 +40,9 @@ class EntryPoint(object):
             if "global_vars" not in config:
                 config["global_vars"] = dict()
             config["global_vars"]["seed"] = INITIAL_SEED
-            logger.info(
-                f"Seed was not specified in the config. Setting to {INITIAL_SEED}."
-            )
+            # logger.info(
+            #     f"Seed was not specified in the config. Setting to {INITIAL_SEED}."
+            # )
 
         # If debug_mode is set, we make sure that it is set in the config object as well.
         if debug_mode is not None:
@@ -56,8 +56,8 @@ class EntryPoint(object):
         )
 
         config_str = json.dumps(config, indent=4, sort_keys=True)
-        logger.info(f"Config files: {config_paths}")
-        logger.info(f"----Config----\n{config_str}\n--------------")
+        # logger.info(f"Config files: {config_paths}")
+        # logger.info(f"----Config----\n{config_str}\n--------------")
 
         # Create the runtime object.
         from treetune.runtime import Runtime

@@ -174,8 +174,8 @@ class ValNetPredictionAnalyzer(Analyzer):
         gc.collect()
 
         requests, full_trajectory_requests = self._create_mc_value_requests(episodes)
-        logger.info(f"Created {len(requests)} MC value requests")
-        logger.info(f"Created {len(full_trajectory_requests)} full trajectory requests")
+        # logger.info(f"Created {len(requests)} MC value requests")
+        # logger.info(f"Created {len(full_trajectory_requests)} full trajectory requests")
 
         if self.max_num_requests is not None and len(requests) > self.max_num_requests:
             requests = random.Random(42).sample(requests, self.max_num_requests)

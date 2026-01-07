@@ -327,17 +327,17 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             * self.num_episodes_per_iteration
             // self.global_batch_size
         )
-        logger.info(f"Per device batch size: {self.args.per_device_train_batch_size}")
-        logger.info(
-            f"Gradient accumulation steps: {self.args.gradient_accumulation_steps}"
-        )
-        logger.info(f"Num of total processes: {self.distributed_state.num_processes}")
-        logger.info(
-            f"Global batch size (w. parallel, distributed & accumulation): {self.global_batch_size}"
-        )
-        logger.info(
-            f"Total number of training steps (Gradient Updates): {self.total_num_training_steps}"
-        )
+        # logger.info(f"Per device batch size: {self.args.per_device_train_batch_size}")
+        # logger.info(
+        #     f"Gradient accumulation steps: {self.args.gradient_accumulation_steps}"
+        # )
+        # logger.info(f"Num of total processes: {self.distributed_state.num_processes}")
+        # logger.info(
+        #     f"Global batch size (w. parallel, distributed & accumulation): {self.global_batch_size}"
+        # )
+        # logger.info(
+        #     f"Total number of training steps (Gradient Updates): {self.total_num_training_steps}"
+        # )
 
     def get_models(
         self,
@@ -427,7 +427,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         # --- START MODIFICATION ---
         if "scores" in episodes_dataset.column_names:
             orig_len = len(episodes_dataset)
-            logger.info(f"Original episode count before filtering for positive scores: {orig_len}")
+            # logger.info(f"Original episode count before filtering for positive scores: {orig_len}")
             
             positive_episodes_dataset = episodes_dataset.filter(
                 lambda example: example.get("scores", 0) > 0,
@@ -435,16 +435,16 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             )
 
             filtered_len = len(positive_episodes_dataset)
-            logger.info(
-                f"Filtered out {orig_len - filtered_len} episodes with non-positive scores. "
-                f"Remaining: {filtered_len}"
-            )
+            # logger.info(
+            #     f"Filtered out {orig_len - filtered_len} episodes with non-positive scores. "
+            #     f"Remaining: {filtered_len}"
+            # )
 
             if filtered_len == 0:
-                logger.warning(
-                    "Filtering for positive scores resulted in an empty dataset. " 
-                    "Signaling to stop training."
-                )
+                # logger.warning(
+                #     "Filtering for positive scores resulted in an empty dataset. " 
+                #     "Signaling to stop training."
+                # )
                 # Raise the custom exception to stop the runtime loop
                 raise StopTrainingError(
                     "No positive-score episodes found. Stopping training."
@@ -462,10 +462,10 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         self._train_actor_critic(episodes_dataset, actor_engine, critic_engine)
 
         if self.run_tracin_analysis and self.distributed_state.is_main_process:
-             logger.info(f"--- Starting TracIn Analysis for Iteration {self.state.iteration} ---")
+            #  logger.info(f"--- Starting TracIn Analysis for Iteration {self.state.iteration} ---")
              # NOTE: 'episodes_dataset' now has all pre-calculated columns attached
              self._run_tracin_analysis(episodes_dataset, self.state.iteration, actor_engine, critic_engine)
-             logger.info(f"--- Finished TracIn Analysis for Iteration {self.state.iteration} ---")
+            #  logger.info(f"--- Finished TracIn Analysis for Iteration {self.state.iteration} ---")
         dist.barrier()
 
         # Save the models' state if needed
@@ -551,36 +551,36 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             self.num_iterations * num_optimization_steps_in_iteration
         )
 
-        logger.info(f"***** Running a PPO training step: {self.state.iteration}  *****")
+        # logger.info(f"***** Running a PPO training step: {self.state.iteration}  *****")
 
-        logger.info(f"  Num Episodes = {len(episodes):,}")
-        logger.info(f"  Num Epochs Per Iteration = {self.num_epochs_per_iteration:,}")
-        logger.info(f"  Num Dataloader Steps in an Epoch = {steps_in_epoch:,}")
-        logger.info(f"  Num Optim. steps in an Epoch = {optim_steps_in_epoch:,}")
-        logger.info(
-            f"  Num Optim. steps in an iteration "
-            f"(#epoch x #optim_step_per_epoch) = {num_optimization_steps_in_iteration:,}"
-        )
-        logger.info(
-            f"  Total Num Optim. steps (#iteration x #epoch x #optim_step_per_epoch) "
-            f"= {total_num_optimization_steps:,}"
-        )
-        logger.info(f"  World Size = {actor.world_size}")
-        logger.info(
-            f"  Gradient Accumulation steps = {self.args.gradient_accumulation_steps}"
-        )
-        logger.info(
-            f"  Per device batch size = {self.args.per_device_train_batch_size}"
-        )
-        logger.info(
-            f"  Global batch size (w. parallel, distributed & accumulation) = {self.global_batch_size}"
-        )
-        logger.info(f"  -------- Model Parameters --------")
+        # logger.info(f"  Num Episodes = {len(episodes):,}")
+        # logger.info(f"  Num Epochs Per Iteration = {self.num_epochs_per_iteration:,}")
+        # logger.info(f"  Num Dataloader Steps in an Epoch = {steps_in_epoch:,}")
+        # logger.info(f"  Num Optim. steps in an Epoch = {optim_steps_in_epoch:,}")
+        # logger.info(
+        #     f"  Num Optim. steps in an iteration "
+        #     f"(#epoch x #optim_step_per_epoch) = {num_optimization_steps_in_iteration:,}"
+        # )
+        # logger.info(
+        #     f"  Total Num Optim. steps (#iteration x #epoch x #optim_step_per_epoch) "
+        #     f"= {total_num_optimization_steps:,}"
+        # )
+        # logger.info(f"  World Size = {actor.world_size}")
+        # logger.info(
+        #     f"  Gradient Accumulation steps = {self.args.gradient_accumulation_steps}"
+        # )
+        # logger.info(
+        #     f"  Per device batch size = {self.args.per_device_train_batch_size}"
+        # )
+        # logger.info(
+        #     f"  Global batch size (w. parallel, distributed & accumulation) = {self.global_batch_size}"
+        # )
+        # logger.info(f"  -------- Model Parameters --------")
 
         actor_num_trainable_params = get_model_param_count(actor, trainable_only=True)
-        logger.info(
-            f"  Number of trainable parameters (actor) = {actor_num_trainable_params:,}"
-        )
+        # logger.info(
+        #     f"  Number of trainable parameters (actor) = {actor_num_trainable_params:,}"
+        # )
         if self._can_log_to_cloud():
             self.cloud_logger.summary["actor/num_trainable_params"] = (
                 actor_num_trainable_params
@@ -598,7 +598,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 )
 
         logger.info(f"  ---------------------------------")
-        logger.info(f"  Current Global Step = {self.state.global_step}")
+        # logger.info(f"  Current Global Step = {self.state.global_step}")
 
         # Create a new dataloader iterator
         dataloader_iter = iter(dataloader)
@@ -2063,9 +2063,9 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 sample_indices = random.sample(range(len(dataset)), num_samples)
                 samples = [dataset[i] for i in sample_indices]
 
-            logger.info(
-                f"[TracIn] Using {len(samples)} validation samples with indices (first 10): {sample_indices[:10]}..."
-            )
+            # logger.info(
+            #     f"[TracIn] Using {len(samples)} validation samples with indices (first 10): {sample_indices[:10]}..."
+            # )
 
             batched_input_ids = []
             batched_labels = []
@@ -2141,7 +2141,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             pad_token_id_to_use = tokenizer.pad_token_id
             if pad_token_id_to_use is None:
                 pad_token_id_to_use = tokenizer.eos_token_id
-                logger.warning(f"[TracIn] tokenizer.pad_token_id is None. Using tokenizer.eos_token_id ({pad_token_id_to_use}) for padding instead.")
+                # logger.warning(f"[TracIn] tokenizer.pad_token_id is None. Using tokenizer.eos_token_id ({pad_token_id_to_use}) for padding instead.")
                 if pad_token_id_to_use is None:
                      raise ValueError("[Error] Both pad_token_id and eos_token_id are None. Cannot pad sequences.") # Add extra check
 
@@ -2218,11 +2218,11 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
             # Check for NaN/Inf loss
             if torch.isnan(loss) or torch.isinf(loss):
-                logger.error("[Error] SFT validation loss is NaN or Inf. Cannot compute gradient.")
+                # logger.error("[Error] SFT validation loss is NaN or Inf. Cannot compute gradient.")
                 return None, loss.item() # Return the problematic loss value
 
         except Exception as e:
-            logger.error(f"[Error] Error during SFT forward/loss calculation: {e}", exc_info=True)
+            # logger.error(f"[Error] Error during SFT forward/loss calculation: {e}", exc_info=True)
             return None, 0.0 # Indicate failure
         # --- End SFT Loss Calculation ---
 
@@ -2233,7 +2233,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             # Note: Critic grads will remain zero if critic wasn't involved in forward pass / loss calc.
 
         except Exception as e:
-            logger.error(f"[Error] Error during SFT backward pass: {e}", exc_info=True)
+            # logger.error(f"[Error] Error during SFT backward pass: {e}", exc_info=True)
             # Attempt to zero grads anyway before returning failure
             actor_engine.zero_grad()
             if critic_engine and not self.disable_critic_training: critic_engine.zero_grad()
@@ -2248,7 +2248,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
         # Check for empty gradient
         if g_val_avg is None or g_val_avg.numel() == 0:
-            logger.warning("[Error] Average validation gradient is empty. Check model setup or loss value.")
+            # logger.warning("[Error] Average validation gradient is empty. Check model setup or loss value.")
             return None, loss.item() # Return loss even if grad is empty
 
         return g_val_avg.detach(), loss.item() # Return detached gradient and loss
@@ -2339,7 +2339,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
         # Check for empty gradient
         if g_train is None or g_train.numel() == 0:
-             logger.warning("[TracIn] Training gradient is empty. Check model setup or loss value.")
+            #  logger.warning("[TracIn] Training gradient is empty. Check model setup or loss value.")
              # Fallback: maybe return zero vector of correct size?
              # For now, return None and handle upstream
              return None, loss.item()
@@ -2361,34 +2361,34 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         """
         # Ensure tokenizer is available
         if not hasattr(self, "runtime") or self.runtime is None:
-            logger.error("[Error] Trainer's runtime object not found. Skipping TracIn analysis.")
+            # logger.error("[Error] Trainer's runtime object not found. Skipping TracIn analysis.")
             return
         if not hasattr(self.runtime, "tokenizer"):
-            logger.error("[Error] Tokenizer not found on runtime. Cannot decode results.")
+            # logger.error("[Error] Tokenizer not found on runtime. Cannot decode results.")
             return
         tokenizer = self.runtime.tokenizer
 
         try:
             # --- 1. Calculate AVERAGE Validation Gradient (G_val_avg) ---
-            logger.info(f"[TracIn] Preparing {self.tracin_num_val_samples} validation samples...")
+            # logger.info(f"[TracIn] Preparing {self.tracin_num_val_samples} validation samples...")
             # Call the modified preparation function
             val_batch = self._prepare_validation_example_tracin(self.tracin_num_val_samples)
             if val_batch is None:
-                logger.error("[Error] Could not prepare validation batch. Aborting.")
+                # logger.error("[Error] Could not prepare validation batch. Aborting.")
                 return
 
-            logger.info("[TracIn] Calculating average validation gradient (G_val_avg)...")
+            # logger.info("[TracIn] Calculating average validation gradient (G_val_avg)...")
             # Call the modified gradient function
             g_val_avg, avg_val_loss = self._get_sft_loss_and_grad_tracin(val_batch, actor_engine, critic_engine)
 
             if g_val_avg is None:
-                logger.error("[Error] Average validation gradient calculation failed. Aborting.")
+                # logger.error("[Error] Average validation gradient calculation failed. Aborting.")
                 return
 
-            logger.info(f"[TracIn] G_val_avg shape: {g_val_avg.shape}, Avg Val Loss: {avg_val_loss:.4f}")
+            # logger.info(f"[TracIn] G_val_avg shape: {g_val_avg.shape}, Avg Val Loss: {avg_val_loss:.4f}")
 
             # --- 2. Calculate Training Gradients (G_train_i) & Influence ---
-            logger.info("[TracIn] Calculating training gradients (G_train_i) and influence scores...")
+            # logger.info("[TracIn] Calculating training gradients (G_train_i) and influence scores...")
 
             data_collator = PPODataCollator()
             dataloader = DataLoader(
@@ -2419,12 +2419,12 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 # --- Skip check (same as before) ---
                 labels = batch.get('labels')
                 if labels is None:
-                    logger.warning(f"[Error] Skipping example index {original_idx}, no 'labels' in batch.")
+                    # logger.warning(f"[Error] Skipping example index {original_idx}, no 'labels' in batch.")
                     continue
                 shifted_labels = labels[..., 1:].contiguous()
                 shifted_labels_mask = (shifted_labels != -100)
                 if shifted_labels_mask.sum() == 0:
-                    logger.warning(f"[Error] Skipping example index {original_idx}, no response tokens (mask_sum=0).")
+                    # logger.warning(f"[Error] Skipping example index {original_idx}, no response tokens (mask_sum=0).")
                     influence_scores.append({
                         "original_index": original_idx, "influence_score": 0.0, "ppo_loss": 0.0,
                         "reward": batch.get('scores', torch.tensor([0.0])).item(),
@@ -2437,7 +2437,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 g_train_i, train_loss_i = self._get_ppo_loss_and_grad_tracin(batch, actor_engine, critic_engine)
 
                 if g_train_i is None:
-                    logger.warning(f"[Error] Skipping empty gradient for train example index {original_idx}")
+                    # logger.warning(f"[Error] Skipping empty gradient for train example index {original_idx}")
                     influence_scores.append({
                         "original_index": original_idx, "influence_score": 0.0, # Or None/NaN?
                         "ppo_loss": train_loss_i,
@@ -2460,7 +2460,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                     response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
                     reward_val = original_record['scores']
                 except Exception as e:
-                    logger.warning(f"[Error] Failed to decode text for index {original_idx}: {e}")
+                    # logger.warning(f"[Error] Failed to decode text for index {original_idx}: {e}")
                     query_text = f"DECODING_FAILED_{original_idx}"
                     response_text = f"DECODING_FAILED_{original_idx}"
                     reward_val = batch.get('scores', torch.tensor([0.0])).item() # Fallback
@@ -2475,7 +2475,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 })
 
             # --- 4. Save Results (similar logic, updated description) ---
-            logger.info("[TracIn] Saving influence scores...")
+            # logger.info("[TracIn] Saving influence scores...")
             influence_scores.sort(key=lambda x: x['influence_score'], reverse=True)
 
             output_dir = self.experiment_root / "tracin_analysis"
@@ -3070,10 +3070,10 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             with self.distributed_state.main_process_first():
                 episodes_dataset = episodes_dataset.filter(filter_fn, desc="Filtering")
 
-            logger.error(
-                f"Filtered out {orig_len - len(episodes_dataset)} episodes "
-                f"that are too long. Remaining: {len(episodes_dataset)}"
-            )
+            # logger.error(
+            #     f"Filtered out {orig_len - len(episodes_dataset)} episodes "
+            #     f"that are too long. Remaining: {len(episodes_dataset)}"
+            # )
 
         return episodes_dataset
 

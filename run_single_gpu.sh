@@ -30,17 +30,30 @@ echo "Found $NUM_GPUS GPU(s)."
 
 # 1. Run the training
 # echo "--- Starting Training ---"
+START_TIME=$(date +%s)
+
 deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501 \
          src/treetune/main.py --configs "$CONFIGSTR" \
             run_iteration_loop
 
-# 2. Run the evaluation
-echo "--- Starting Evaluation ---"
-deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501  \
-         src/treetune/main.py --configs "$CONFIGSTR" \
-            run_evaluation
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+# Convert to readable format (Hours:Minutes:Seconds)
+H=$((DURATION / 3600))
+M=$(( (DURATION % 3600) / 60 ))
+S=$((DURATION % 60))
 
 echo "--- Experiment Complete ---"
+echo "Full Training Time: ${H}h ${M}m ${S}s"
+
+# 2. Run the evaluation
+# echo "--- Starting Evaluation ---"
+# deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501  \
+#          src/treetune/main.py --configs "$CONFIGSTR" \
+#             run_evaluation
+
+# echo "--- Experiment Complete ---"
 
 # chmod +x run_single_gpu.sh
 # bash ./run_single_gpu.sh 2>&1 | tee my_experiment.log

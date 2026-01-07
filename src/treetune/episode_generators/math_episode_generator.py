@@ -129,8 +129,8 @@ class MathEpisodeGenerator(EpisodeGeneratorWithRewardFunction):
                     )
                     metrics.setdefault("parse_failed", []).append(False)
                 except Exception as e:
-                    logger.error(f"Parsing reasoning steps failed {e}")
-                    logger.error(f"Response: `{response_text}`")
+                    # logger.error(f"Parsing reasoning steps failed {e}")
+                    # logger.error(f"Response: `{response_text}`")
                     metrics.setdefault("parse_failed", []).append(True)
 
                 if finish_reason != "length":
@@ -153,11 +153,11 @@ class MathEpisodeGenerator(EpisodeGeneratorWithRewardFunction):
                         )
                     )
                 except Exception as e:
-                    logger.error(
-                        f"Failed to tokenize query and response for instance {instance['_treetune__idx']}: {e}"
-                    )
-                    logger.error(f"Query: {query_text}")
-                    logger.error(f"Response: {response_text}")
+                    # logger.error(
+                    #     f"Failed to tokenize query and response for instance {instance['_treetune__idx']}: {e}"
+                    # )
+                    # logger.error(f"Query: {query_text}")
+                    # logger.error(f"Response: {response_text}")
                     metrics.setdefault("empty_response", []).append(True)
                     continue
 
@@ -166,10 +166,10 @@ class MathEpisodeGenerator(EpisodeGeneratorWithRewardFunction):
                 if self.max_sequence_length is not None:
                     seq_len = len(query_token_ids) + len(response_token_ids)
                     if seq_len > self.max_sequence_length:
-                        logger.warning(
-                            f"Sequence length {seq_len} is greater than "
-                            f"max sequence length {self.max_sequence_length}."
-                        )
+                        # logger.warning(
+                        #     f"Sequence length {seq_len} is greater than "
+                        #     f"max sequence length {self.max_sequence_length}."
+                        # )
 
                         # Truncate the response
                         response_token_ids = response_token_ids[
@@ -179,9 +179,9 @@ class MathEpisodeGenerator(EpisodeGeneratorWithRewardFunction):
                         is_unfinished_response = True
 
                 if len(response_token_ids) == 0:
-                    logger.warning(
-                        f"Response token ids are empty for instance {instance['_treetune__idx']}"
-                    )
+                    # logger.warning(
+                    #     f"Response token ids are empty for instance {instance['_treetune__idx']}"
+                    # )
                     metrics.setdefault("empty_response", []).append(True)
                     continue
 

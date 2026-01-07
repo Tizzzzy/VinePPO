@@ -123,7 +123,7 @@ class MathEpisodeGeneratorWithMCAdvantages(MathEpisodeGenerator):
                     [Dataset.load_from_disk(str(p)) for p in shard_paths]
                 )
                 merged.save_to_disk(val_est_result_path)
-                logger.info(f"Created {len(merged)} value estimation results in total.")
+                # logger.info(f"Created {len(merged)} value estimation results in total.")
                 del merged
                 release_memory()
 
@@ -482,13 +482,13 @@ class MathEpisodeGeneratorWithMCAdvantages(MathEpisodeGenerator):
                         query_text, response_text
                     )
                 except Exception as e:
-                    logger.error(
-                        (
-                            f"Truncating response failed {e}\n"
-                            f"Query: `{query_text}`\n"
-                            f"Response: `{response_text}`"
-                        )
-                    )
+                    # logger.error(
+                    #     (
+                    #         f"Truncating response failed {e}\n"
+                    #         f"Query: `{query_text}`\n"
+                    #         f"Response: `{response_text}`"
+                    #     )
+                    # )
                     continue
 
                 is_truncated = new_response_text != response_text
@@ -507,12 +507,12 @@ class MathEpisodeGeneratorWithMCAdvantages(MathEpisodeGenerator):
                     )
                     metrics["parse_failed"].append(False)
                 except Exception as e:
-                    logger.error(
-                        (
-                            f"Parsing reasoning steps failed {e}\n"
-                            f"Response: `{response_text}`"
-                        )
-                    )
+                    # logger.error(
+                    #     (
+                    #         f"Parsing reasoning steps failed {e}\n"
+                    #         f"Response: `{response_text}`"
+                    #     )
+                    # )
                     metrics["parse_failed"].append(True)
                     continue
 
@@ -731,12 +731,12 @@ class MathEpisodeGeneratorWithMCAdvantages(MathEpisodeGenerator):
                 unique_requests.append(req)
             all_requests_to_unique_idx.append(unique_queries[req["query"]])
 
-        logger.info(
-            (
-                f"Rank {self.distributed_state.process_index}: "
-                f"Num. Unique Requests: {len(unique_requests)} ({len(all_requests)} total)"
-            )
-        )
+        # logger.info(
+        #     (
+        #         f"Rank {self.distributed_state.process_index}: "
+        #         f"Num. Unique Requests: {len(unique_requests)} ({len(all_requests)} total)"
+        #     )
+        # )
 
         ds = Dataset.from_list(unique_requests)
         ds.save_to_disk(results_root_dir / "value_estimation_requests_ds_temp")
@@ -758,7 +758,7 @@ class MathEpisodeGeneratorWithMCAdvantages(MathEpisodeGenerator):
             merged.save_to_disk(
                 results_root_dir.parent / "merged_value_estimation_requests"
             )
-            logger.info(f"Created {len(merged)} value estimation requests in total.")
+            # logger.info(f"Created {len(merged)} value estimation requests in total.")
             del merged
             release_memory()
 

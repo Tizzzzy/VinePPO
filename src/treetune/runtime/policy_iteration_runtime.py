@@ -268,6 +268,11 @@ class PolicyIterationRuntime(DistributedRuntime):
 
             self._cloud_log({"timing/total/training_step": time.time() - t0})
 
+            step_duration = time.time() - t0
+            if is_local_main_process:
+                with open(self.exp_root / "training_times.txt", "a") as f:
+                    f.write(f"Iteration {iteration}: {step_duration:.2f} seconds\n")
+
             assert (
                 iteration + 1 == trainer.state.iteration
             ), f"{iteration+1} != {trainer.state.iteration}"
@@ -898,9 +903,9 @@ class PolicyIterationRuntime(DistributedRuntime):
             try:
                 subprocess.check_call(shlex.split(command))
             except subprocess.CalledProcessError as e:
-                logger.error(f"Error converting checkpoint: {e}")
-                logger.error(f"stdout: {e.stdout}")
-                logger.error(f"stderr: {e.stderr}")
+                # logger.error(f"Error converting checkpoint: {e}")
+                # logger.error(f"stdout: {e.stdout}")
+                # logger.error(f"stderr: {e.stderr}")
                 raise e
 
             config = AutoConfig.from_pretrained(self.model._params["hf_model_name"])

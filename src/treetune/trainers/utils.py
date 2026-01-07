@@ -341,8 +341,8 @@ def monitor_tensor_anomalies(
     combined_mask = ~nan_mask & ~inf_mask & bool_mask
     # Cast the final combined mask to boolean for indexing
     combined_mask = combined_mask.bool() 
-    print(f"DEBUG monitor: tensor shape={tensor.shape}, mask shape={mask.shape}, nan_mask shape={nan_mask.shape}, inf_mask shape={inf_mask.shape}")
-    print(f"DEBUG monitor: combined_mask shape={combined_mask.shape}, dtype={combined_mask.dtype}") # Should now be torch.bool
+    # print(f"DEBUG monitor: tensor shape={tensor.shape}, mask shape={mask.shape}, nan_mask shape={nan_mask.shape}, inf_mask shape={inf_mask.shape}")
+    # print(f"DEBUG monitor: combined_mask shape={combined_mask.shape}, dtype={combined_mask.dtype}") # Should now be torch.bool
     # --- END: Debug prints ---
 
     finite_tensor = tensor[combined_mask]

@@ -48,7 +48,7 @@ def see_memory_usage(message, force=False):
     gc.collect()
 
     # Print message except when distributed but not rank 0
-    logger.info(message)
+    # logger.info(message)
     device_index = dist.get_rank()
     logger.info(
         f"MA {round(get_accelerator().memory_allocated(device_index=device_index) / (1024 * 1024 * 1024),2 )} GB \
@@ -373,11 +373,11 @@ class EpisodeGeneratorWithRewardModel(OnPolicyEpisodeGenerator, TreeEpisodeUtils
                 query_text, response_text
             )
         except Exception as e:
-            logger.error(
-                f"Failed to tokenize query and response for instance {instance['_treetune__idx']}"
-            )
-            logger.error(f"Query: {query_text}")
-            logger.error(f"Response: {response_text}")
+            # logger.error(
+            #     f"Failed to tokenize query and response for instance {instance['_treetune__idx']}"
+            # )
+            # logger.error(f"Query: {query_text}")
+            # logger.error(f"Response: {response_text}")
             return []
 
         if self.chop_response:
@@ -435,11 +435,11 @@ class EpisodeGeneratorWithRewardModel(OnPolicyEpisodeGenerator, TreeEpisodeUtils
             )
             has_warned = False
             if decoded_instance != instance_text:
-                logger.warning(
-                    f"Decoded instance does not match original instance.\n"
-                    f"Original instance: {instance_text}\n"
-                    f"Decoded instance: {decoded_instance}"
-                )
+                # logger.warning(
+                #     f"Decoded instance does not match original instance.\n"
+                #     f"Original instance: {instance_text}\n"
+                #     f"Decoded instance: {decoded_instance}"
+                # )
                 has_warned = True
 
             decoded_query = self.tokenizer.decode(
@@ -448,11 +448,11 @@ class EpisodeGeneratorWithRewardModel(OnPolicyEpisodeGenerator, TreeEpisodeUtils
                 skip_special_tokens=False,
             )
             if decoded_query != query:
-                logger.warning(
-                    f"Decoded query does not match original query.\n"
-                    f"Original query: {query}\n"
-                    f"Decoded query: {decoded_query}"
-                )
+                # logger.warning(
+                #     f"Decoded query does not match original query.\n"
+                #     f"Original query: {query}\n"
+                #     f"Decoded query: {decoded_query}"
+                # )
                 has_warned = True
 
             decoded_response = self.tokenizer.decode(
@@ -461,11 +461,11 @@ class EpisodeGeneratorWithRewardModel(OnPolicyEpisodeGenerator, TreeEpisodeUtils
                 skip_special_tokens=False,
             )
             if decoded_response != response:
-                logger.warning(
-                    f"Decoded response does not match original response.\n"
-                    f"Original response: {response}\n"
-                    f"Decoded response: {decoded_response}"
-                )
+                # logger.warning(
+                #     f"Decoded response does not match original response.\n"
+                #     f"Original response: {response}\n"
+                #     f"Decoded response: {decoded_response}"
+                # )
                 has_warned = True
 
             self.has_warned_about_decoding_mismatch = has_warned
