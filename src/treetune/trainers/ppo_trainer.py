@@ -71,6 +71,30 @@ class StopTrainingError(Exception):
     pass
 # --- END MODIFICATION 1 ---
 
+class WeightedPPODataCollator:
+    """
+    Wrapper around PPODataCollator to handle 'influence_weight' column.
+    """
+    def __init__(self, base_collator):
+        self.base_collator = base_collator
+
+    def __call__(self, features):
+        influence_weights = None
+        # Check if influence_weight exists in the features
+        if features and "influence_weight" in features[0]:
+            # Extract and remove it so base_collator doesn't get confused
+            influence_weights = [f.pop("influence_weight") for f in features]
+            influence_weights = torch.tensor(influence_weights, dtype=torch.float32)
+        
+        # Use the standard PPO collator for the rest
+        batch = self.base_collator(features)
+        
+        # Re-attach the weights to the batch
+        if influence_weights is not None:
+            batch["influence_weights"] = influence_weights
+            
+        return batch
+
 @dataclass
 class PPOHParams:
     """
@@ -280,6 +304,60 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             not self.ppo_hparams.force_disable_kl_penalty
             and self.reference_lazy is not None
         )
+    
+    def _calculate_influence_scores(
+        self,
+        episodes_dataset: Dataset,
+        actor_engine: DeepSpeedEngine,
+        critic_engine: Optional[DeepSpeedEngine]
+    ) -> List[float]:
+        """Calculates TracIn influence scores for the current dataset."""
+        logger.info("[TracIn] Calculating influence scores for filtering/reweighting...")
+        
+        # 1. Prepare Validation Gradient (Average)
+        # Note: Using your existing TracIn helper methods
+        val_batch = self._prepare_validation_example_tracin(self.tracin_num_val_samples)
+        if val_batch is None:
+            logger.warning("[TracIn] Failed to prepare validation batch. Returning neutral scores.")
+            return [1.0] * len(episodes_dataset)
+
+        g_val_avg, _ = self._get_sft_loss_and_grad_tracin(val_batch, actor_engine, critic_engine)
+        if g_val_avg is None:
+            logger.warning("[TracIn] Failed to calc validation gradient. Returning neutral scores.")
+            return [1.0] * len(episodes_dataset)
+
+        # 2. Compute Training Gradients & Scores
+        scores = []
+        
+        # Use a temporary dataloader to iterate strictly sequentially
+        data_collator = PPODataCollator()
+        dataloader = DataLoader(
+            episodes_dataset,
+            batch_size=1,
+            shuffle=False, 
+            collate_fn=data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
+
+        actor_engine.train()
+        if critic_engine: critic_engine.train()
+
+        # Iterate and compute scores
+        for batch in tqdm(dataloader, desc="[TracIn] Scoring Episodes"):
+            # Calculate gradient for this episode
+            g_train_i, _ = self._get_ppo_loss_and_grad_tracin(batch, actor_engine, critic_engine)
+            
+            if g_train_i is None:
+                scores.append(0.0)
+                continue
+
+            # Influence Score = Dot Product
+            # We detach to save memory as we accumulate simple floats
+            score = torch.sum(g_val_avg.detach() * g_train_i.detach()).item()
+            scores.append(score)
+
+        return scores
 
     def _has_critic_model(self):
         return self.critic_lazy is not None
@@ -425,36 +503,36 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         )
 
         # --- START MODIFICATION ---
-        if "scores" in episodes_dataset.column_names:
-            orig_len = len(episodes_dataset)
-            # logger.info(f"Original episode count before filtering for positive scores: {orig_len}")
+        if self.run_tracin_analysis:
+            logger.info("Calculating TracIn influence scores...")
+            influence_scores = self._calculate_influence_scores(episodes_dataset, actor_engine, critic_engine)
             
-            positive_episodes_dataset = episodes_dataset.filter(
-                lambda example: example.get("scores", 0) > 0,
-                desc="Filtering for positive scores"
+            # Add scores to dataset
+            episodes_dataset = episodes_dataset.add_column("influence_score", influence_scores)
+            
+            # 1. Filter: Remove episodes with score <= 0
+            orig_len = len(episodes_dataset)
+            episodes_dataset = episodes_dataset.filter(
+                lambda x: x["influence_score"] > 0,
+                desc="Filtering negative influence episodes"
             )
+            logger.info(f"[TracIn] Filtered {orig_len - len(episodes_dataset)} episodes. Remaining: {len(episodes_dataset)}")
+            
+            if len(episodes_dataset) == 0:
+                raise StopTrainingError("No positive influence episodes found.")
 
-            filtered_len = len(positive_episodes_dataset)
-            # logger.info(
-            #     f"Filtered out {orig_len - filtered_len} episodes with non-positive scores. "
-            #     f"Remaining: {filtered_len}"
-            # )
+            # 2. Reweight: Add weight column
+            # We normalize weights to mean=1.0 to preserve the effective learning rate scale
+            scores_tensor = torch.tensor(episodes_dataset["influence_score"])
+            mean_score = scores_tensor.mean().item()
+            
+            def add_weight_fn(x):
+                # Weight = score / mean_score
+                return {"influence_weight": x["influence_score"] / (mean_score + 1e-8)}
 
-            if filtered_len == 0:
-                # logger.warning(
-                #     "Filtering for positive scores resulted in an empty dataset. " 
-                #     "Signaling to stop training."
-                # )
-                # Raise the custom exception to stop the runtime loop
-                raise StopTrainingError(
-                    "No positive-score episodes found. Stopping training."
-                )
-
-            episodes_dataset = positive_episodes_dataset # Use the filtered dataset
-        else:
-            logger.warning(
-                "Cannot filter for positive scores: 'scores' column not found in dataset. "
-                "Training on all data for this iteration."
+            episodes_dataset = episodes_dataset.map(
+                add_weight_fn,
+                desc="Reweighting episodes"
             )
 # --- END MODIFICATION ---
 
@@ -530,12 +608,16 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         kls = self._log_episodes_metrics(episodes)
 
         # Step 2: The actual PPO training loop
+        base_collator = PPODataCollator()
+        weighted_collator = WeightedPPODataCollator(base_collator)
+
+        # Step 2: The actual PPO training loop
         dataloader = prepare_data_loader_for_training(
             episodes,
             per_device_batch_size=self.args.per_device_train_batch_size,
             seed=self.args.seed,
             data_loader_kwargs={
-                "collate_fn": PPODataCollator(),
+                "collate_fn": weighted_collator, # <--- Changed here
                 "num_workers": self.args.dataloader_num_workers,
                 "pin_memory": self.args.dataloader_pin_memory,
             },
@@ -741,6 +823,11 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         # >>> logits_seq_len = logps_seq_len = valid_values_len = seq_len - 1 = 6
 
         # noinspection DuplicatedCode
+
+        influence_weights = inputs.pop("influence_weights", None)
+        if influence_weights is not None:
+            influence_weights = influence_weights.to(actor.device)
+
         inputs = {k: v.to(actor.device) for k, v in inputs.items()}
 
         input_ids = inputs["input_ids"]  # Shape: (batch_size, max_seq_len)
@@ -839,6 +926,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             old_logprobs=shifted_actor_logprobs,
             ref_logprobs=shifted_ref_logprobs,
             advantages=advantages,
+            influence_weights=influence_weights,
         )
         actor.backward(actor_loss)
         self._check_overflow(actor)
@@ -909,6 +997,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         old_logprobs: torch.FloatTensor,
         ref_logprobs: Optional[torch.FloatTensor],
         advantages: torch.FloatTensor,
+        influence_weights: Optional[torch.Tensor] = None,
     ) -> Tuple[
         torch.FloatTensor, bool, Dict[str, torch.Tensor], Optional[torch.FloatTensor]
     ]:
@@ -993,6 +1082,12 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             ratio, 1.0 - self.ppo_hparams.cliprange, 1.0 + self.ppo_hparams.cliprange
         )
         pg_losses = torch.max(pg_losses1, pg_losses2)
+
+        if influence_weights is not None:
+            # Broadcast weights: (batch_size) -> (batch_size, 1)
+            # This multiplies every token loss in the sequence by the episode weight
+            pg_losses = pg_losses * influence_weights.view(-1, 1)
+
         pg_loss = masked_mean(pg_losses, action_mask)
 
         if self.ppo_hparams.kl_penalty_loss_type is not None:

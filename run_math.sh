@@ -6,15 +6,14 @@ echo "Setting up configuration..."
 # export MASTER_PORT=29501
 
 # Set the base config for Rho PPO on GSM8K + single GPU config
-export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
-configs/trainers/devBz2.jsonnet"
-# export CONFIGSTR="configs/polIter_rho1bSft2_ppo_MATH.jsonnet,\
+# export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
 # configs/trainers/devBz2.jsonnet"
+export CONFIGSTR="configs/polIter_rho1bSft2_ppo_MATH.jsonnet,\
+configs/trainers/devBz2.jsonnet"
 
 # Set your desired output directory
 # export APP_DIRECTORY="experiments/rho_ppo_math_single_gpu"
-export APP_DIRECTORY="experiments/ppo_gsm8k_new"
-
+export APP_DIRECTORY="experiments/ppo_math_new"
 # Set a seed (optional, from README)
 export APP_SEED="2746318213"
 
@@ -49,12 +48,12 @@ echo "--- Experiment Complete ---"
 echo "Full Training Time: ${H}h ${M}m ${S}s"
 
 # 2. Run the evaluation
-echo "--- Starting Evaluation ---"
-deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501  \
-         src/treetune/main.py --configs "$CONFIGSTR" \
-            run_evaluation
+# echo "--- Starting Evaluation ---"
+# deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501  \
+#          src/treetune/main.py --configs "$CONFIGSTR" \
+#             run_evaluation
 
-echo "--- Experiment Complete ---"
+# echo "--- Experiment Complete ---"
 
-# chmod +x run_single_gpu.sh
-# bash ./run_single_gpu.sh 2>&1 | tee my_experiment.log
+# chmod +x run_math.sh
+# bash ./run_math.sh 2>&1 | tee my_experiment.log
