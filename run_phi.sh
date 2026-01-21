@@ -6,20 +6,21 @@ echo "Setting up configuration..."
 # export MASTER_PORT=29501
 
 # Set the base config for Rho PPO on GSM8K + single GPU config
-# export CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,\
-# configs/trainers/devBz2.jsonnet"
-export CONFIGSTR="configs/polIter_rho1bSft2_ppo_MATH.jsonnet,\
-configs/trainers/devBz2.jsonnet"
+export CONFIGSTR="configs/polIter_phi3_ppo_GSM8K.jsonnet,\
+configs/trainers/devBz4.jsonnet"
+# export CONFIGSTR="configs/polIter_rho1bSft2_ppo_MATH.jsonnet,\
+# configs/trainers/devBz4.jsonnet"
 
 # Set your desired output directory
-# export APP_DIRECTORY="experiments/rho_ppo_math_single_gpu"
-export APP_DIRECTORY="experiments/ppo_math_new"
+export APP_DIRECTORY="experiments/phi3_ppo_gsm8k_reweight"
+# export APP_DIRECTORY="experiments/ppo_gsm8k_reweight"
+
 # Set a seed (optional, from README)
 export APP_SEED="2746318213"
 
 # Optional: Set this if you use Weights & Biases.
 # If not, you can delete this line.
-export WANDB_RUN_ID="1b4a3ed40eeaae71d5f0fbbd8a220395978e7520"
+# export WANDB_RUN_ID="1b4a3ed40eeaae71d5f0fbbd8a220395978e7520"
 
 
 # --- 2. Run the Experiment ---
@@ -48,12 +49,12 @@ echo "--- Experiment Complete ---"
 echo "Full Training Time: ${H}h ${M}m ${S}s"
 
 # 2. Run the evaluation
-# echo "--- Starting Evaluation ---"
-# deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501  \
-#          src/treetune/main.py --configs "$CONFIGSTR" \
-#             run_evaluation
+echo "--- Starting Evaluation ---"
+deepspeed --no_local_rank --num_gpus=$NUM_GPUS --master_port=29501  \
+         src/treetune/main.py --configs "$CONFIGSTR" \
+            run_evaluation --every_n_checkpoints=10000
 
-# echo "--- Experiment Complete ---"
+echo "--- Experiment Complete ---"
 
-# chmod +x run_math.sh
-# bash ./run_math.sh 2>&1 | tee my_experiment.log
+# chmod +x run_single_gpu.sh
+# bash ./run_single_gpu.sh 2>&1 | tee my_experiment.log
