@@ -363,6 +363,9 @@ class PolicyIterationRuntime(DistributedRuntime):
         ckpts = self._get_list_of_evaluation_checkpoints(
             checkpoint_dir, every_n_checkpoints
         )
+
+        ckpts = [ckpts[-1]]  # TEMPORARY: only evaluate on the last checkpoint
+
         logger.info(
             f"Running evaluation on {len(ckpts)} checkpoints "
             f"(since every_n_checkpoints = {every_n_checkpoints})."
